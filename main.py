@@ -597,11 +597,12 @@ def execute_pipeline(pipeline):
 
 # ── Interpreter ───────────────────────────────────────────────────────────────
 
-def interpret_command(command: str):
-    """Interpret user input, build missing tools, and execute the pipeline."""
+def interpret_command(command: str) -> bool:
+    """Interpret user input, build missing tools, and execute the pipeline.
+    Returns False if user requested exit, True otherwise.
+    """
     if command.lower() in ["exit", "quit"]:
-        print("Exiting the program.")
-        return
+        return False
 
     # ── Slash command check ────────────────────────────────────────────────────
     if handle_slash_command(command):
@@ -695,10 +696,7 @@ def interpret_command(command: str):
             return
         else:
             mavis_ok("All missing tools built successfully.")
-            if interactive_select_yes_no("Some tools may require MAV to restart. Restart now?", default=False):
-                restart_mav()
-            else:
-                mavis_status("Proceeding with pipeline execution.")
+            mavis_status("Proceeding with pipeline execution.")
 
     # 3. Execute the pipeline (ONI pre-flight inside execute_pipeline)
     pipeline = response_dict.get("pipeline", [])
@@ -750,8 +748,8 @@ def _stop_workers() -> None:
     for proc in _worker_procs:
         try:
             proc.terminate()
-            proc.wait(timeout=5)
-        except Exception:
+            proc.wait(timeout=2)
+        except BaseException:
             try:
                 proc.kill()
             except Exception:
@@ -806,25 +804,29 @@ if __name__ == "__main__":
         while True:
             try:
                 command = session.prompt(_get_prompt_message()).strip()
-            except EOFError:
+            except (EOFError, KeyboardInterrupt):
                 break
-            except KeyboardInterrupt:
-                continue
             if not command:
                 continue
-            interpret_command(command)
+            if command.lower() in ["exit", "quit"]:
+                break
+            if not interpret_command(command):
+                break
 
             # Refresh heartbeat after each user interaction if interval reached
             now = time.time()
             if now - _last_heartbeat >= _HEARTBEAT_INTERVAL:
                 _write_heartbeat()
                 _last_heartbeat = now
-    except KeyboardInterrupt:
-        mavis_print("\n[dim]Interrupted.[/dim]", level="quiet")
+    except BaseException:
+        pass
     finally:
-        _stop_workers()
+        try:
+            _stop_workers()
+        except BaseException:
+            pass
         try:
             runner.stop()
-        except KeyboardInterrupt:
-            pass  # scheduler thread is a daemon — exits with process
+        except BaseException:
+            pass
         mavis_print("[dim]Goodbye.[/dim]", level="quiet")
