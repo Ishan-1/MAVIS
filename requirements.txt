@@ -1,0 +1,8 @@
+google-genai
+python-dotenv
+requests
+parsedatetime
+schedule
+chromadb==1.5.9
+rich
+prompt_toolkit

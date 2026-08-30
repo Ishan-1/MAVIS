@@ -1,0 +1,95 @@
+{
+    "version": "1.3",
+
+    "oni": {
+        "trust_level": "ask",
+        "blacklist": [],
+        "whitelist": [
+            "get_current_datetime",
+            "extract_date_from_datetime",
+            "parse_natural_date_to_yyyymmdd",
+            "search_news",
+            "echo",
+            "date",
+            "pwd",
+            "cat",
+            "tr",
+            "grep",
+            "wc",
+            "head",
+            "tail",
+            "sort",
+            "uniq"
+        ],
+        "greylist": [
+            "restart_process",
+            "install_package",
+            "rm",
+            "mv",
+            "cp",
+            "chmod",
+            "chown",
+            "curl",
+            "wget",
+            "pip"
+        ],
+        "url_blacklist": [],
+        "approved_fs_write_paths": [
+            "tools/",
+            "tests/",
+            "memories/",
+            "logs/",
+            "data/"
+        ],
+        "approved_fs_files": [
+            "requirements.txt"
+        ],
+        "tool_execution_timeout_seconds": 30
+    },
+
+    "memory": {
+        "max_token": 12000,
+        "context_window": 1000000,
+        "top_k": 5,
+        "short_term_ttl_days": 7,
+        "repetition_window": 50,
+        "repetition_similarity_threshold": 0.85,
+        "repetition_min_count": 3,
+        "session_timeout_minutes": 30,
+        "emotion_strength_threshold": 0.75,
+        "intent_strength_threshold": 0.85,
+        "lt_intent_threshold": 0.90
+    },
+
+    "toolbuilder": {
+        "max_retries": 3,
+        "forbidden_imports": [
+            "subprocess",
+            "socket",
+            "ftplib",
+            "paramiko",
+            "pexpect",
+            "httplib2"
+        ],
+        "forbidden_os_attrs": [
+            "system",
+            "popen",
+            "fork",
+            "execv",
+            "execl",
+            "execle",
+            "execlp",
+            "execlpe",
+            "execvp",
+            "execvpe",
+            "spawn",
+            "spawnl"
+        ]
+    },
+
+    "scheduler": {
+        "tick_seconds": 30,
+        "short_term_worker_interval_minutes": 15,
+        "long_term_worker_interval_minutes": 480
+    }
+}

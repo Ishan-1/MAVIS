@@ -1,0 +1,42 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment (project root is the venv)
+bin/
+include/
+lib/
+lib64
+pyvenv.cfg
+
+# Environment & secrets
+.env
+.mavis_*
+*.bin
+# Tools
+tools/
+# Logs
+logs/
+
+# Auto-generated test files
+tests/
+
+# Memory persistence & runtime data
+memories/**/chroma/
+memories/**/.cursor
+memories/working_memory.json
+memories/**/json/*.json
+!memories/**/json/.gitkeep
+
+# Vosk model zip (large binary, model dir is needed but zip is not)
+models/
+
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+

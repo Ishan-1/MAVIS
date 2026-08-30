@@ -1,0 +1,9 @@
+{
+    "get_current_datetime() -> tuple[int, str]": "Retrieves the system's current date and time.",
+    "extract_date_from_datetime(datetime_string: str) -> tuple[int, str]": "Extracts the date part (YYYY-MM-DD) from a full datetime string.",
+    "search_news(query: str, date: str = None, start_date: str = None, end_date: str = None) -> tuple[int, list]": "Searches for news articles based on a query and an optional specific date or date range.",
+    "parse_natural_date_to_yyyymmdd(date_string: str) -> tuple[int, str]": "Parses a natural language date string into 'YYYY-MM-DD' format.",
+    "set_user_display_name(name: str) -> tuple[int, bool]": "Sets the preferred display name for the current user, to be used in future interactions.",
+    "get_user_display_name() -> tuple[int, str]": "Retrieves the current user's preferred display name.",
+    "read_file_contents(filename: str) -> tuple[int, str]": "Reads the content of a specified file from the current directory."
+}
