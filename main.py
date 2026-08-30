@@ -152,7 +152,7 @@ def _get_prompt_message():
 
 def _get_bottom_toolbar():
     return [
-        ("", " [MAVIS v1.5]  Type / for commands • ↑/↓ for history • 'exit' to quit "),
+        ("", " [MAVIS v1.0]  Type / for commands • ↑/↓ for history • 'exit' to quit "),
     ]
 
 
@@ -769,7 +769,7 @@ def _write_heartbeat() -> None:
 
 if __name__ == "__main__":
     rule()
-    mavis_print("  [bold cyan]MAVIS[/bold cyan]  [dim]v1.5 · ONI · unified config · worker subprocesses[/dim]")
+    mavis_print("  [bold cyan]MAVIS[/bold cyan]  [dim]v1.0 [/dim]")
     mavis_print("  Type [bold]/help[/bold] for commands, [bold]/[/bold] to browse suggestions. Say [dim]exit[/dim] to quit.")
     rule()
     mavis_status(f"ONI trust level: {_oni.config.trust_level}")
