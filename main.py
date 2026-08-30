@@ -1,8 +1,8 @@
-from google import genai
 from dotenv import load_dotenv
 from prompts.prompt_templates import interpreter_prompt
 from tool_builder import ToolBuilder
 from core.scheduler import TaskRunner
+from core.llm import get_llm_client
 from memories.memory_store import MemoryStore
 from memories.emotion_classifier import parse_classifier_fields
 from core.output import (
@@ -23,12 +23,10 @@ import subprocess
 import sys
 import time
 
-
-
 load_dotenv()
-client = genai.Client(vertexai=True, api_key=os.getenv("VERTEX_API_KEY"))
-tool_builder = ToolBuilder(client)
-memory_store = MemoryStore(client)
+llm = get_llm_client()
+tool_builder = ToolBuilder(llm)
+memory_store = MemoryStore(llm, namespace="interpreter")
 
 # ── Central config + ONI ────────────────────────────────────────────────────────────
 from core.config import cfg
@@ -624,15 +622,12 @@ def interpret_command(command: str) -> bool:
 
     try:
         with spinner("Interpreting..."):
-            llm_response = client.models.generate_content(
-                model="gemini-2.5-flash", contents=prompt_text
-            ).text
-        response = llm_response.removeprefix("```json").removesuffix("```").strip()
+            response = llm.generate(prompt_text, json_mode=True)
         mavis_debug(response, entity="interpreter")
         response_dict = json.loads(response)
     except json.JSONDecodeError:
         mavis_error("I had trouble understanding that — try rephrasing.")
-        mavis_debug(f"Raw LLM response: {llm_response}", entity="interpreter")
+        mavis_debug(f"Raw LLM response: {response}", entity="interpreter")
         return
     except Exception as e:
         mavis_error(f"LLM call failed: {e}")

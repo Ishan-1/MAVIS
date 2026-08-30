@@ -9,7 +9,8 @@ Design:
     this module is never called for already-stored memories.
 """
 
-from google import genai
+from typing import Any
+from core.llm import get_llm_client, BaseLLMClient
 from core.helpers import log_it
 import os
 
@@ -17,35 +18,34 @@ _ENTITY = "embedding"
 _MODEL = "text-embedding-004"
 
 
-def get_client() -> genai.Client:
-    """Return a Gemini client, reusing env config from main."""
-    return genai.Client(vertexai=True, api_key=os.getenv("VERTEX_API_KEY"))
+def get_client() -> BaseLLMClient:
+    """Return the configured LLM client."""
+    return get_llm_client()
 
 
-def embed(text: str, client: genai.Client | None = None) -> list[float]:
+def embed(text: str, client: BaseLLMClient | Any | None = None) -> list[float]:
     """
-    Embed *text* using Gemini text-embedding-004 and return the vector.
+    Embed *text* using configured LLM client and return the vector.
 
     Args:
         text:   The string to embed. Truncated to ~8 000 chars if longer.
-        client: Optional pre-created genai.Client. If None, one is created.
+        client: Optional pre-created BaseLLMClient or genai.Client. If None, default is used.
 
     Returns:
-        A list[float] embedding vector (length 768 for text-embedding-004).
-
-    Raises:
-        RuntimeError: if the Gemini call fails after one attempt.
+        A list[float] embedding vector.
     """
     if client is None:
         client = get_client()
 
-    # Defensive truncation — embedding model has a token limit
+    if isinstance(client, BaseLLMClient):
+        return client.embed(text)
+
+    # Backward compatibility with direct genai.Client
     if len(text) > 8_000:
         text = text[:8_000]
 
     try:
         result = client.models.embed_content(model=_MODEL, contents=text)
-        # The SDK returns EmbedContentResponse; extract the values list.
         vector = result.embeddings[0].values
         log_it(f"Embedded text (len={len(text)}) → vector dim={len(vector)}.", _ENTITY)
         return list(vector)

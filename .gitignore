@@ -26,7 +26,7 @@ tests/
 # Memory persistence & runtime data
 memories/**/chroma/
 memories/**/.cursor
-memories/working_memory.json
+memories/**/working_memory.json
 memories/**/json/*.json
 !memories/**/json/.gitkeep
 

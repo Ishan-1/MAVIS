@@ -160,8 +160,8 @@ _SELECT_STYLE = Style.from_dict(
     {
         "prompt": "bold yellow",
         "selected": "bold green reverse",
-        "unselected": "dim white",
-        "hint": "dim cyan italic",
+        "unselected": "#888888",
+        "hint": "cyan italic",
     }
 )
 

@@ -83,12 +83,12 @@ def main():
     entity = f"{worker_name}_worker_proc"
     log_it(f"Worker process started for {worker_name} (interval={interval_min}m).", entity)
 
-    # Initialize genai client and MemoryStore
-    from google import genai
+    # Initialize LLM client and MemoryStore
+    from core.llm import get_llm_client
     from memories.memory_store import MemoryStore
 
-    client = genai.Client(vertexai=True, api_key=os.getenv("VERTEX_API_KEY"))
-    store = MemoryStore(client)
+    client = get_llm_client()
+    store = MemoryStore(client, namespace="interpreter")
 
     if worker_name == "short_term":
         import tasks.short_term_worker as task_mod

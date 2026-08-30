@@ -48,12 +48,12 @@ from google import genai
 
 from core.config import cfg
 from core.helpers import log_it
+from core.llm import get_llm_client, BaseLLMClient
 from memories.embedding import embed, cosine_similarity
 
 _ENTITY = "memory_store"
 
 # ── Configuration helpers (read live from central cfg) ────────────────────────
-# These are functions so runtime /config set changes take effect immediately.
 def _max_token() -> int:
     return cfg.memory.get("max_token", 12000)
 
@@ -68,18 +68,6 @@ def _st_ttl_days() -> int:
 
 # ── Path helpers ─────────────────────────────────────────────────────────────
 _BASE = os.path.join(os.path.dirname(__file__))
-_ST_CHROMA = os.path.join(_BASE, "short_term", "chroma")
-_ST_JSON = os.path.join(_BASE, "short_term", "json")
-_LT_CHROMA = os.path.join(_BASE, "long_term", "chroma")
-_LT_JSON = os.path.join(_BASE, "long_term", "json")
-_ST_CURSOR = os.path.join(_BASE, "short_term", ".cursor")
-_LT_CURSOR = os.path.join(_BASE, "long_term", ".cursor")
-_WM_JSON = os.path.join(_BASE, "working_memory.json")
-
-
-def _ensure_dirs():
-    for d in (_ST_CHROMA, _ST_JSON, _LT_CHROMA, _LT_JSON):
-        os.makedirs(d, exist_ok=True)
 
 
 def _token_count(text: str) -> int:
@@ -94,42 +82,57 @@ def _today() -> str:
 
 class MemoryStore:
     """
-    Thread-safe three-tier memory manager.
+    Thread-safe three-tier memory manager supporting domain namespaces.
 
-    Usage:
-        store = MemoryStore(client)          # client: genai.Client
-        store.add_turn("user", text, ...)
-        context = store.retrieve_context(query)
+    Namespaces isolate memories on disk (e.g. 'interpreter', 'toolbuilder', 'debugger').
     """
 
-    def __init__(self, client: genai.Client):
-        _ensure_dirs()
-        self._client = client
+    def __init__(self, client: BaseLLMClient | Any | None = None, namespace: str = "interpreter"):
+        self.namespace = namespace
+        self._client = client or get_llm_client()
         self._lock = threading.Lock()
+
+        # Paths scoped to this namespace
+        self._ns_dir = os.path.join(_BASE, namespace)
+        self._st_chroma = os.path.join(self._ns_dir, "short_term", "chroma")
+        self._st_json = os.path.join(self._ns_dir, "short_term", "json")
+        self._lt_chroma = os.path.join(self._ns_dir, "long_term", "chroma")
+        self._lt_json = os.path.join(self._ns_dir, "long_term", "json")
+        self._st_cursor = os.path.join(self._ns_dir, "short_term", ".cursor")
+        self._lt_cursor = os.path.join(self._ns_dir, "long_term", ".cursor")
+        self._wm_json = os.path.join(self._ns_dir, "working_memory.json")
+
+        for d in (self._st_chroma, self._st_json, self._lt_chroma, self._lt_json):
+            os.makedirs(d, exist_ok=True)
 
         # Working memory: list of turn dicts
         self._working: list[dict] = []
-
-        # Track last user input timestamp for active-session detection
         self.last_user_input_ts: float = 0.0
 
-        # ChromaDB clients (PersistentClient keeps data on disk)
-        self._st_chroma = chromadb.PersistentClient(path=_ST_CHROMA)
-        self._lt_chroma = chromadb.PersistentClient(path=_LT_CHROMA)
+        # ChromaDB clients
+        self._st_chroma_client = chromadb.PersistentClient(path=self._st_chroma)
+        self._lt_chroma_client = chromadb.PersistentClient(path=self._lt_chroma)
 
-        # Collections — get_or_create is idempotent
-        self._st_col = self._st_chroma.get_or_create_collection(
-            name="short_term",
+        # Collections scoped per namespace
+        self._st_col = self._st_chroma_client.get_or_create_collection(
+            name=f"{namespace}_short_term",
             metadata={"hnsw:space": "cosine"},
         )
-        self._lt_col = self._lt_chroma.get_or_create_collection(
-            name="long_term",
+        self._lt_col = self._lt_chroma_client.get_or_create_collection(
+            name=f"{namespace}_long_term",
             metadata={"hnsw:space": "cosine"},
         )
 
-        # Ensure long-term JSON files exist
-        for fname in ("behaviours.json", "facts.json"):
-            path = os.path.join(_LT_JSON, fname)
+        # Ensure default long-term JSON files exist for this namespace
+        default_files = {
+            "interpreter": ("behaviours.json", "facts.json"),
+            "toolbuilder": ("patterns.json",),
+            "debugger": ("fixes.json",),
+            "tasks": ("events.json",),
+        }.get(namespace, ("facts.json",))
+
+        for fname in default_files:
+            path = os.path.join(self._lt_json, fname)
             if not os.path.exists(path):
                 with open(path, "w") as f:
                     json.dump([], f)
@@ -137,30 +140,30 @@ class MemoryStore:
         # Load persisted working memory if present
         self.reload_working_memory()
 
-        log_it("MemoryStore initialised.", _ENTITY)
+        log_it(f"MemoryStore initialised (namespace={self.namespace!r}).", _ENTITY)
 
     # ── Public: working memory ────────────────────────────────────────────────
 
     def _persist_working_memory_unlocked(self):
         """Atomically persist current working memory to disk for worker subprocesses."""
         try:
-            tmp_file = f"{_WM_JSON}.tmp"
+            tmp_file = f"{self._wm_json}.tmp"
             payload = {
                 "last_user_input_ts": self.last_user_input_ts,
                 "working": self._working,
             }
             with open(tmp_file, "w") as f:
                 json.dump(payload, f)
-            os.replace(tmp_file, _WM_JSON)
+            os.replace(tmp_file, self._wm_json)
         except Exception as e:
             log_it(f"Failed to persist working memory: {e}", _ENTITY)
 
     def reload_working_memory(self):
         """Reload working memory and last_user_input_ts from disk (used by worker subprocesses)."""
-        if not os.path.exists(_WM_JSON):
+        if not os.path.exists(self._wm_json):
             return
         try:
-            with open(_WM_JSON, "r") as f:
+            with open(self._wm_json, "r") as f:
                 payload = json.load(f)
             with self._lock:
                 self.last_user_input_ts = payload.get("last_user_input_ts", self.last_user_input_ts)
@@ -206,7 +209,7 @@ class MemoryStore:
             self._maybe_compact()
             self._persist_working_memory_unlocked()
 
-        log_it(f"add_turn: role={role!r} tokens≈{_token_count(content)}", _ENTITY)
+        log_it(f"add_turn ({self.namespace}): role={role!r} tokens≈{_token_count(content)}", _ENTITY)
 
     def get_working_memory(self) -> list[dict]:
         """Return a shallow copy of the working memory list (thread-safe)."""
@@ -220,48 +223,69 @@ class MemoryStore:
 
     # ── Public: retrieval ────────────────────────────────────────────────────
 
-    def retrieve_context(self, query: str) -> str:
+    def retrieve_context(
+        self,
+        query: str,
+        extra_namespaces: list[str] | None = None,
+        top_k: int | None = None,
+    ) -> str:
         """
         Build the retrieval-augmented context string for the LLM prompt.
 
-        Format:
-            [Long-term memories — top-K relevant]
-            [Short-term memories — last 7 days, top-K relevant]
-            [Working memory — full, up to token cap]
-            (current user input is appended by the caller)
+        Supports cross-namespace subscriptions via *extra_namespaces*
+        (e.g., toolbuilder querying debugger fix memories).
         """
+        k = top_k if top_k is not None else _top_k()
         query_vec = embed(query, self._client)
         sections: list[str] = []
 
-        # Long-term top-K
-        lt_entries = self._query_chroma(self._lt_col, query_vec, _top_k())
+        # Long-term top-K for this namespace
+        lt_entries = self._query_chroma(self._lt_col, query_vec, k)
         if lt_entries:
-            sections.append("### Long-term memories")
+            sections.append(f"### Long-term memories ({self.namespace})")
             sections.extend(lt_entries)
+
+        # Cross-namespace peer memories
+        if extra_namespaces:
+            for extra_ns in extra_namespaces:
+                try:
+                    peer_lt_path = os.path.join(_BASE, extra_ns, "long_term", "chroma")
+                    if os.path.exists(peer_lt_path):
+                        peer_chroma = chromadb.PersistentClient(path=peer_lt_path)
+                        peer_col = peer_chroma.get_or_create_collection(
+                            name=f"{extra_ns}_long_term",
+                            metadata={"hnsw:space": "cosine"},
+                        )
+                        peer_entries = self._query_chroma(peer_col, query_vec, k)
+                        if peer_entries:
+                            sections.append(f"### Reference memories ({extra_ns})")
+                            sections.extend(peer_entries)
+                except Exception as exc:
+                    log_it(f"Peer memory query ({extra_ns}) failed: {exc}", _ENTITY)
 
         # Short-term top-K (scoped to rolling TTL window)
         cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=_st_ttl_days())).strftime(
             "%Y-%m-%d"
         )
         st_entries = self._query_chroma(
-            self._st_col, query_vec, _top_k(), where={"date": {"$gte": cutoff}}
+            self._st_col, query_vec, k, where={"date": {"$gte": cutoff}}
         )
         if st_entries:
-            sections.append(f"### Short-term memories (last {_st_ttl_days()} days)")
+            sections.append(f"### Short-term memories ({self.namespace}, last {_st_ttl_days()} days)")
             sections.extend(st_entries)
 
-        # Full working memory
+        # Full working memory for this namespace
         with self._lock:
             wm_lines = [
                 f"[{t['role']}] {t['content']}" for t in self._working
             ]
         if wm_lines:
-            sections.append("### Working memory (current session)")
+            sections.append(f"### Working memory ({self.namespace} session)")
             sections.extend(wm_lines)
 
         context = "\n".join(sections)
         log_it(
-            f"retrieve_context: lt={len(lt_entries)} st={len(st_entries)} "
+            f"retrieve_context ({self.namespace}): lt={len(lt_entries)} st={len(st_entries)} "
             f"wm={len(wm_lines)} turns",
             _ENTITY,
         )
@@ -272,17 +296,16 @@ class MemoryStore:
     def write_short_term(self, entry: dict):
         """
         Write *entry* to today's short-term JSON file and ChromaDB collection.
-
         *entry* must have at least: id, content, timestamp.
         """
         today = _today()
         entry.setdefault("date", today)
 
         # JSON (human-readable reference)
-        json_path = os.path.join(_ST_JSON, f"{today}.json")
+        json_path = os.path.join(self._st_json, f"{today}.json")
         self._append_to_json(json_path, entry)
 
-        # ChromaDB — embed if no vector present (summaries have no cached vec)
+        # ChromaDB — embed if no vector present
         vector = entry.get("embedding") or embed(entry["content"], self._client)
         self._st_col.upsert(
             ids=[entry["id"]],
@@ -290,21 +313,26 @@ class MemoryStore:
             documents=[entry["content"]],
             metadatas=[{"date": today, "role": entry.get("role", "system")}],
         )
-        log_it(f"write_short_term: id={entry['id']!r} date={today}", _ENTITY)
+        log_it(f"write_short_term ({self.namespace}): id={entry['id']!r} date={today}", _ENTITY)
 
     def write_long_term(self, entry: dict, ltype: str):
         """
-        Write *entry* to long-term storage.  *ltype* must be 'behaviour' or 'fact'.
+        Write *entry* to long-term storage.
+        Supported ltype: 'behaviour', 'fact', 'pattern', 'fix', 'event'.
         """
-        if ltype not in ("behaviour", "fact"):
-            raise ValueError(f"ltype must be 'behaviour' or 'fact', got {ltype!r}")
-
         entry.setdefault("id", str(uuid.uuid4()))
         entry.setdefault("date", _today())
         entry["ltype"] = ltype
 
-        # JSON
-        json_path = os.path.join(_LT_JSON, f"{ltype}s.json")
+        # JSON file naming
+        if ltype in ("behaviour", "fact", "pattern", "event"):
+            fname = f"{ltype}s.json"
+        elif ltype == "fix":
+            fname = "fixes.json"
+        else:
+            fname = f"{ltype}.json"
+
+        json_path = os.path.join(self._lt_json, fname)
         self._append_to_json(json_path, entry)
 
         # ChromaDB
@@ -315,7 +343,17 @@ class MemoryStore:
             documents=[entry["content"]],
             metadatas=[{"type": ltype, "date": entry["date"]}],
         )
-        log_it(f"write_long_term: id={entry['id']!r} type={ltype!r}", _ENTITY)
+        log_it(f"write_long_term ({self.namespace}): id={entry['id']!r} type={ltype!r}", _ENTITY)
+
+    def write_pattern(self, tool_name: str, signature: str, summary: str):
+        """Helper to write an established tool building pattern."""
+        content = f"Tool Pattern [{tool_name}]: {signature}\nConvention / Summary: {summary}"
+        self.write_long_term({"content": content, "tool": tool_name}, ltype="pattern")
+
+    def write_fix(self, tool_name: str, error_snippet: str, fix_summary: str):
+        """Helper to write a tool debugging fix pair."""
+        content = f"Tool Debug Fix [{tool_name}]: Error: {error_snippet}\nFix: {fix_summary}"
+        self.write_long_term({"content": content, "tool": tool_name}, ltype="fix")
 
     # ── Cursor helpers for background workers ─────────────────────────────────
 
@@ -338,15 +376,23 @@ class MemoryStore:
 
     @property
     def st_cursor_path(self) -> str:
-        return _ST_CURSOR
+        return self._st_cursor
 
     @property
     def lt_cursor_path(self) -> str:
-        return _LT_CURSOR
+        return self._lt_cursor
 
     @property
     def st_json_dir(self) -> str:
-        return _ST_JSON
+        return self._st_json
+
+    @property
+    def lt_json_dir(self) -> str:
+        return self._lt_json
+
+    @property
+    def wm_json_path(self) -> str:
+        return self._wm_json
 
     # ── Compaction (called under lock) ────────────────────────────────────────
 
@@ -378,9 +424,12 @@ class MemoryStore:
             "preserving any important facts, decisions, or preferences:\n\n" + block
         )
         try:
-            summary_text = self._client.models.generate_content(
-                model="gemini-2.5-flash", contents=summary_prompt
-            ).text.strip()
+            if hasattr(self._client, "generate"):
+                summary_text = self._client.generate(summary_prompt)
+            else:
+                summary_text = self._client.models.generate_content(
+                    model="gemini-2.5-flash", contents=summary_prompt
+                ).text.strip()
         except Exception as exc:
             log_it(f"Compaction LLM call failed: {exc}", _ENTITY)
             summary_text = "[compacted session excerpt — LLM summary unavailable]"
@@ -404,7 +453,7 @@ class MemoryStore:
         """Same as write_short_term but assumes the caller holds _lock."""
         today = _today()
         entry.setdefault("date", today)
-        json_path = os.path.join(_ST_JSON, f"{today}.json")
+        json_path = os.path.join(self._st_json, f"{today}.json")
         self._append_to_json(json_path, entry)
         vector = embed(entry["content"], self._client)
         self._st_col.upsert(

@@ -7,8 +7,7 @@
 
 
 ## Memory is not specialized
-- ToolBuilder is not concerned with memory related to interpreter and vice-versa. There should be a way to demarcate different topics in memory, such as tools, tasks, user-profile, etc. Possibly, a publisher-subscriber model will be best with each component being a
-subscriber to relevant memory topics.
+- ~~ToolBuilder is not concerned with memory related to interpreter and vice-versa. There should be a way to demarcate different topics in memory, such as tools, tasks, user-profile, etc. Possibly, a publisher-subscriber model will be best with each component being a subscriber to relevant memory topics.~~ **Fixed** (Implemented topic namespaces in `MemoryStore` for `interpreter`, `toolbuilder`, `debugger`, and `tasks`. Added multi-collection ChromaDB isolation, cross-namespace peer retrieval via `extra_namespaces`, and specialized pattern/fix writes for ToolBuilder and Debugger).
 
 ## High Dependence on Gemini
-- MAVIS only uses Gemini as a backbone and should be able to support using any LLM as a backbone. To achieve this, LLM calls must be abstracted to a LLM class (something like Langchain client) for this purpose.
+- ~~MAVIS only uses Gemini as a backbone and should be able to support using any LLM as a backbone. To achieve this, LLM calls must be abstracted to a LLM class (something like Langchain client) for this purpose.~~ **Fixed** (Introduced `core/llm` unified provider layer with `BaseLLMClient`, `GeminiClient`, `OpenAICompatClient`, and `OllamaClient`. MAVIS now loads provider settings from `mavis_config.json` and supports local LLMs without code changes).

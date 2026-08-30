@@ -93,6 +93,15 @@ _DEFAULTS: dict = {
         "history_file": "data/.mavis_history",
         "notify_pipeline_threshold_s": 5,   # min elapsed seconds to fire a desktop notification
     },
+
+    "llm": {
+        "provider": "gemini",               # gemini | openai | ollama
+        "model": "gemini-2.5-flash",
+        "embedding_model": "text-embedding-004",
+        "temperature": 0.2,
+        "vertexai": True,
+        "base_url": None,
+    },
 }
 
 
@@ -150,6 +159,10 @@ class MAVISConfig:
     @property
     def output(self) -> dict:
         return self._data.setdefault("output", dict(_DEFAULTS["output"]))
+
+    @property
+    def llm(self) -> dict:
+        return self._data.setdefault("llm", dict(_DEFAULTS["llm"]))
 
     # ── Generic get / set ─────────────────────────────────────────────────────
 

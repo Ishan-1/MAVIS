@@ -43,6 +43,8 @@ class ToolBuilder:
         self.client = client
         self.builder_prompt = builder_prompt
         self.entity_name = entity_name
+        from memories.memory_store import MemoryStore
+        self.memory = MemoryStore(self.client, namespace="toolbuilder")
 
     # ------------------------------------------------------------------
     # Dependency / environment helpers
@@ -137,6 +139,8 @@ class ToolBuilder:
 
     def _llm(self, prompt: str) -> str:
         """Call the LLM and return the stripped text response."""
+        if hasattr(self.client, "generate"):
+            return self.client.generate(prompt, json_mode=True)
         raw = self.client.models.generate_content(
             model="gemini-2.5-flash", contents=prompt
         ).text
@@ -196,6 +200,19 @@ class ToolBuilder:
 
         # ── 1. Generate tool code ──────────────────────────────────────
         ref_context = self._find_reference_tools(func_sig, func_desc)
+
+        # Cross-namespace retrieval: query toolbuilder conventions and debugger fixes
+        try:
+            mem_context = self.memory.retrieve_context(
+                f"{func_sig} {func_desc}",
+                extra_namespaces=["debugger"],
+                top_k=2,
+            )
+            if mem_context:
+                ref_context = f"{ref_context}\n\n{mem_context}\n"
+        except Exception as me:
+            log_it(f"Memory retrieval in ToolBuilder failed: {me}", self.entity_name)
+
         build_prompt = self.builder_prompt.format(
             reference_tools=ref_context,
             function_signature=func_sig,
@@ -225,6 +242,18 @@ class ToolBuilder:
                     self.entity_name,
                 )
                 self._register_tool(func_sig, func_desc)
+
+                # Specialized Memory: Record successful pattern or debug fix
+                try:
+                    if attempt == 0:
+                        self.memory.write_pattern(func_name, func_sig, func_desc)
+                    else:
+                        from memories.memory_store import MemoryStore
+                        debugger_mem = MemoryStore(self.client, namespace="debugger")
+                        debugger_mem.write_fix(func_name, "Build retry needed", f"Fixed and verified after {attempt} retries.")
+                except Exception as e:
+                    log_it(f"Failed to record memory in ToolBuilder: {e}", self.entity_name)
+
                 return
 
             # Test failed

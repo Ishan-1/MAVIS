@@ -21,10 +21,14 @@ from core.output import (
     print_table,
 )
 
+from core.llm import get_llm_client, BaseLLMClient
+
 __all__ = [
     "cfg",
     "log_it",
     "TaskRunner",
+    "get_llm_client",
+    "BaseLLMClient",
     "mavis_answer",
     "mavis_status",
     "mavis_ok",
