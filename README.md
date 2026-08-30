@@ -1,4 +1,4 @@
-# MAVIS — Modular Autonomous Virtual Intelligence Suite
+# MAVIS — My Awesome Virtual Intelligence Suite
 
 MAVIS is an extensible, local-first personal AI assistant built for resilient automation. It decomposes natural language instructions into validated DAG execution pipelines, synthesizes and tests missing tools on-the-fly, maintains specialized long-term memory across isolated domain topics, and enforces strict security through the **ONI** harness.
 
