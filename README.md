@@ -233,7 +233,7 @@ MAV/
 │   ├── long_term_worker.py   # Short-term → long-term archiver & pruner
 │   └── worker_process.py     # Isolated worker daemon subprocess
 ├── tools/                    # Dynamic and manual Python tool files (gitignored)
-├── tests/                    # Unit tests and generated tool tests
+├── tests/                    # Unit tests and generated tool tests (gitignored)
 ├── prompts/                  # LLM prompt templates
 └── logs/                     # Component logs and audit records (gitignored)
 ```
@@ -249,9 +249,3 @@ If the ChromaDB on-disk schema was created with an incompatible version, run:
 ```
 This cleanly wipes stale vector collections across all namespaces and regenerates them fresh.
 
-### Running Automated Tests
-To run memory and unit tests:
-```bash
-source bin/activate
-python3 tests/test_memory_specialization.py
-```
