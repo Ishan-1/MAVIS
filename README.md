@@ -106,17 +106,6 @@ MAVIS provides full architectural symmetry between deterministic Python tools an
 - **`semantic_transform` Primitive**: A built-in universal sub-agent for ad-hoc unstructured extractions, filtering, and multi-document summarization.
 - **Terminal Answerer (`core/answerer.py`)**: A dedicated presentation module that synthesizes final pipeline answers for the user while quarantining raw tool returns inside `<tool_data>` blocks.
 
-### 6. Strict Internal Execution Contract & Error Handling
-MAVIS enforces a clean separation of concerns between high-level planning and low-level runtime execution:
-- **Internal Execution Contract**: All tools and agents adhere to a mandatory 2-element runtime return convention: `(status_code: int, output: Any)` (`0` for success, `-1` for failure).
-- **Deterministic Error Handling**: In `execute_pipeline()`, non-zero status codes immediately halt the pipeline and display formatted error diagnostics, preventing silent failures or cascade errors. Successful outputs (`status == 0`) are automatically unpacked into `$node_id.output`.
-- **Clean Functional Planning**: The Interpreter is relieved of execution plumbing and plans in natural functional return signatures (`-> str`, `-> list`), while `core/run_tool.py`, `ToolTester`, and `AgentTester` strictly enforce the internal tuple contract at runtime.
-- **Automated Test Cache Eviction**: `ToolTester` explicitly evicts `sys.modules` entries between test retries to ensure that newly debugged code is reloaded fresh from disk.
-
-### 7. Multi-File Summarization & Memory Resilience
-- **Multi-File Processing Flow**: Tools like `read_and_concatenate_files` aggregate raw multi-file contents and direct their combined text (`$read_node.output`) into `semantic_transform` for semantic summarization before terminal Answerer presentation.
-- **ChromaDB Date Filtering**: Short-term memory retrieval computes rolling TTL cutoffs across metadata dates directly in Python, bypassing ChromaDB operator restrictions on string values.
-- **REPL Crash Guard**: The interactive prompt loop in `main.py` is protected by defensive exception handling, ensuring that runtime tool errors or rejected security prompts never crash the active session.
 
 ---
 
