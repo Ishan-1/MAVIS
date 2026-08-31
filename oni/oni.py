@@ -17,7 +17,9 @@ Additionally:
 """
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -47,6 +49,15 @@ class ONI:
     def __init__(self) -> None:
         self.config = ONIConfig()
         self.gate = ConfirmationGate()
+        self.session_allowances: set[str] = set()
+
+        env_allowances = os.environ.get("MAVIS_SESSION_ALLOWANCES")
+        if env_allowances:
+            try:
+                self.session_allowances.update(json.loads(env_allowances))
+            except Exception:
+                pass
+
         log_it(
             f"ONI initialised. Trust level: {self.config.trust_level}",
             _ENTITY,
@@ -99,7 +110,8 @@ class ONI:
 
         for node in pipeline:
             command = node.get("function_name", "")
-            decision = classify_command(command, self.config, trust)
+            params = node.get("params", {})
+            decision = "allow" if command in self.session_allowances else classify_command(command, self.config, trust)
 
             if decision == "deny":
                 denied.append(command)
@@ -112,6 +124,29 @@ class ONI:
                 })
             elif decision == "greylist":
                 greylisted.append(command)
+
+            # Deep parameter scan for known tools
+            if command == "run_shell_command" and isinstance(params.get("command"), str):
+                shell_cmd = params["command"]
+                for segment in shell_cmd.split("|"):
+                    try:
+                        parts = shlex.split(segment.strip())
+                        sub_exe = parts[0] if parts else ""
+                    except ValueError:
+                        sub_exe = segment.strip().split()[0] if segment.strip() else ""
+                    if sub_exe:
+                        sub_dec = "allow" if sub_exe in self.session_allowances else classify_command(sub_exe, self.config, trust)
+                        if sub_dec == "deny":
+                            denied.append(f"{sub_exe} (in shell command)")
+                        elif sub_dec == "greylist":
+                            greylisted.append(sub_exe)
+            elif command == "call_system_command" and isinstance(params.get("command"), str):
+                sub_cmd = params["command"]
+                sub_dec = "allow" if sub_cmd in self.session_allowances else classify_command(sub_cmd, self.config, trust)
+                if sub_dec == "deny":
+                    denied.append(sub_cmd)
+                elif sub_dec == "greylist":
+                    greylisted.append(sub_cmd)
 
         # Phase 1 — any blacklisted command kills the pipeline
         if denied:
@@ -136,6 +171,8 @@ class ONI:
         approved = self.gate.request_approval(
             f"Run pipeline with greylist command(s): {', '.join(unique)}"
         )
+        if approved:
+            self.session_allowances.update(unique)
         record({
             "type": "preflight_greylist",
             "commands": unique,
@@ -159,7 +196,7 @@ class ONI:
             (0, result) on success, (-1, error_message) on denial or failure.
         """
         trust = self._effective_trust()
-        decision = classify_command(command, self.config, trust)
+        decision = "allow" if command in self.session_allowances else classify_command(command, self.config, trust)
 
         audit_entry: dict = {
             "type": "system",
@@ -184,9 +221,10 @@ class ONI:
             if not approved:
                 log_it(f"DENIED (greylist) system command: {command}", _ENTITY)
                 return -1, f"Command '{command}' denied (greylist)."
+            self.session_allowances.add(command)
         else:
             # decision == "allow"
-            audit_entry.update({"decision": "allowed", "approved_by": "whitelist"})
+            audit_entry.update({"decision": "allowed", "approved_by": "whitelist" if command in self.config.whitelist else "session_allowance"})
             record(audit_entry)
 
         log_it(f"Executing system command: {command}", _ENTITY)
@@ -238,7 +276,6 @@ class ONI:
         Returns:
             (0, stdout) on success, (-1, error_message) on denial or failure.
         """
-        import shlex
         trust = self._effective_trust()
 
         # Parse pipe segments and extract executables
@@ -255,7 +292,7 @@ class ONI:
         greylisted = []
 
         for exe in executables:
-            decision = classify_command(exe, self.config, trust)
+            decision = "allow" if exe in self.session_allowances else classify_command(exe, self.config, trust)
             if decision == "deny":
                 denied.append(exe)
             elif decision == "greylist":
@@ -291,9 +328,10 @@ class ONI:
             if not approved:
                 log_it(f"DENIED (greylist) call_shell: {shell_string}", _ENTITY)
                 return -1, f"Shell command denied (greylist: {', '.join(unique_grey)})."
+            self.session_allowances.update(unique_grey)
         else:
-            # All whitelisted — auto-approve
-            audit_entry.update({"decision": "allowed", "approved_by": "whitelist"})
+            # All whitelisted or in session allowances — auto-approve
+            audit_entry.update({"decision": "allowed", "approved_by": "whitelist" if all(e in self.config.whitelist for e in executables) else "session_allowance"})
             record(audit_entry)
 
         log_it(f"Executing shell: {shell_string}", _ENTITY)

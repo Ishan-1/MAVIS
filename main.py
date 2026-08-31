@@ -24,6 +24,7 @@ import tasks.short_term_worker as st_worker
 import tasks.long_term_worker as lt_worker
 import os
 import json
+import selectors
 import subprocess
 import sys
 import time
@@ -465,34 +466,111 @@ def _notify(title: str, body: str = "") -> None:
 
 def call_command(command_name, params_dict):
     """
-    Execute a tool in an isolated subprocess via run_tool.py.
+    Execute a tool in an isolated subprocess via run_tool.py with two-way IPC.
 
     Sandboxing: a crashed or malicious tool cannot take down the MAVIS process.
-    Tool prints go to stderr and are not mixed with the JSON result.
+    Tool prints go to stderr and are captured for debug logs.
+    Bidirectional IPC handles interactive ONI approval prompts in the main terminal.
     A configurable timeout kills runaway tools.
     """
+    env = os.environ.copy()
+    env["MAVIS_TOOL_SUBPROCESS"] = "1"
+    if hasattr(_oni, "session_allowances") and _oni.session_allowances:
+        env["MAVIS_SESSION_ALLOWANCES"] = json.dumps(list(_oni.session_allowances))
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            os.path.join(_MAV_ROOT, "core", "run_tool.py"),
+            command_name,
+            json.dumps(params_dict),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        cwd=_MAV_ROOT,
+        env=env,
+    )
+
+    sel = selectors.DefaultSelector()
+    sel.register(proc.stdout, selectors.EVENT_READ, data="stdout")
+    sel.register(proc.stderr, selectors.EVENT_READ, data="stderr")
+
+    timeout_seconds = float(_oni.config.tool_execution_timeout)
+    elapsed_tool_time = 0.0
+    last_tick = time.time()
+    final_output_str = ""
+    stderr_lines = []
+
     try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                os.path.join(_MAV_ROOT, "core", "run_tool.py"),
-                command_name,
-                json.dumps(params_dict),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=_oni.config.tool_execution_timeout,
-            cwd=_MAV_ROOT,
-        )
+        while proc.poll() is None or sel.get_map():
+            now = time.time()
+            elapsed_tool_time += (now - last_tick)
+            last_tick = now
 
-        if result.stderr.strip():
-            mavis_debug(result.stderr.strip(), entity=command_name)
+            if elapsed_tool_time >= timeout_seconds:
+                proc.kill()
+                proc.wait()
+                msg = f"'{command_name}' timed out after {int(timeout_seconds)}s."
+                mavis_error(msg)
+                _notify("MAVIS: Tool Timeout", msg)
+                return -1, f"Tool '{command_name}' timed out."
 
-        if result.returncode != 0 and not result.stdout.strip():
-            mavis_error(f"Tool '{command_name}' exited with code {result.returncode}.")
-            return -1, result.stderr.strip() or f"Tool '{command_name}' exited with error."
+            remaining = max(0.1, timeout_seconds - elapsed_tool_time)
+            events = sel.select(timeout=min(remaining, 0.5))
 
-        status, output = json.loads(result.stdout.strip())
+            for key, mask in events:
+                if key.data == "stdout":
+                    line = proc.stdout.readline()
+                    if not line:
+                        sel.unregister(proc.stdout)
+                        continue
+                    try:
+                        data = json.loads(line.strip())
+                    except Exception:
+                        data = None
+
+                    if isinstance(data, dict) and data.get("__oni_ipc__"):
+                        if data.get("type") == "approval_request":
+                            desc = data.get("description", "")
+                            approved = _oni.gate.request_approval(desc)
+                            proc.stdin.write(json.dumps({"approved": approved}) + "\n")
+                            proc.stdin.flush()
+                            # Do not count user decision time towards tool execution timeout
+                            last_tick = time.time()
+                    else:
+                        final_output_str = line.strip()
+
+                elif key.data == "stderr":
+                    line = proc.stderr.readline()
+                    if not line:
+                        sel.unregister(proc.stderr)
+                        continue
+                    stderr_lines.append(line)
+
+        proc.wait()
+
+        try:
+            rem_err = proc.stderr.read()
+            if rem_err:
+                stderr_lines.append(rem_err)
+        except Exception:
+            pass
+
+        full_stderr = "".join(stderr_lines).strip()
+        if full_stderr:
+            mavis_debug(full_stderr, entity=command_name)
+
+        if proc.returncode != 0 and not final_output_str:
+            mavis_error(f"Tool '{command_name}' exited with code {proc.returncode}.")
+            return -1, full_stderr or f"Tool '{command_name}' exited with error."
+
+        if not final_output_str:
+            return -1, f"Tool '{command_name}' produced no output."
+
+        status, output = json.loads(final_output_str)
 
         if status == 0:
             mavis_ok(f"'{command_name}' executed successfully.")
@@ -507,13 +585,22 @@ def call_command(command_name, params_dict):
         _notify("MAVIS: Tool Timeout", msg)
         return -1, f"Tool '{command_name}' timed out."
     except json.JSONDecodeError as e:
-        raw = result.stdout.strip() if 'result' in dir() else ''
         mavis_error(f"'{command_name}' returned invalid output.")
-        mavis_debug(f"Raw stdout: {raw}", entity=command_name)
+        mavis_debug(f"Raw stdout: {final_output_str}", entity=command_name)
         return -1, f"Invalid output from tool '{command_name}': {e}"
     except Exception as e:
         mavis_error(f"Unexpected error with '{command_name}': {e}")
         return -1, str(e)
+    finally:
+        try:
+            sel.close()
+        except Exception:
+            pass
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
 
 # ── Pipeline execution ────────────────────────────────────────────────────────

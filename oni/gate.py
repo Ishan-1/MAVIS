@@ -5,6 +5,9 @@ automatic denial for background threads (no user present).
 """
 from __future__ import annotations
 
+import json
+import os
+import sys
 import threading
 
 
@@ -14,11 +17,9 @@ class ConfirmationGate:
 
     Design:
       - Main thread calls: block on input(), wait for yes/no.
+      - Tool subprocess calls: delegate via IPC to the parent MAVIS process.
       - Background thread calls: auto-deny immediately and log the reason.
         Background tasks should never interrupt the user or block indefinitely.
-
-    This is intentionally simple — no async queue needed because the
-    pre-flight scan serialises all greylist prompts before any execution begins.
     """
 
     def __init__(self) -> None:
@@ -37,6 +38,24 @@ class ConfirmationGate:
             True if the user approved, False if denied or called from a
             background thread (auto-deny).
         """
+        # If running inside a tool runner child subprocess, forward request to parent MAVIS
+        if os.environ.get("MAVIS_TOOL_SUBPROCESS") == "1":
+            try:
+                payload = json.dumps({
+                    "__oni_ipc__": True,
+                    "type": "approval_request",
+                    "description": description,
+                })
+                sys.__stdout__.write(payload + "\n")
+                sys.__stdout__.flush()
+                line = sys.__stdin__.readline()
+                if not line:
+                    return False
+                resp = json.loads(line.strip())
+                return bool(resp.get("approved", False))
+            except Exception:
+                return False
+
         if not self._is_main_thread():
             print(
                 f"\n[ONI] ⚠ Background task requested approval for: {description}\n"

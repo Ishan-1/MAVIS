@@ -26,5 +26,9 @@
     "read_file_contents(filename: str) -> tuple[int, str]": {
         "description": "Reads the content of a specified file from the current directory.",
         "generalizability": "generalizable"
+    },
+    "run_shell_command(command: str) -> tuple[int, str]": {
+        "description": "Executes a shell command directly in the system's terminal.",
+        "generalizability": "generalizable"
     }
 }

@@ -21,10 +21,34 @@ _MAV_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _MAV_ROOT not in sys.path:
     sys.path.insert(0, _MAV_ROOT)
 
+# Mark that we are running inside the tool runner subprocess
+os.environ["MAVIS_TOOL_SUBPROCESS"] = "1"
+
 # Redirect stdout → stderr so tool debug prints don't corrupt the JSON result.
-# We hold a reference to the real stdout to write the final JSON response.
-_real_stdout = sys.stdout
+# sys.__stdout__ and sys.__stdin__ retain direct access to the process's real file descriptors.
 sys.stdout = sys.stderr
+
+
+def ipc_request_approval(description: str) -> bool:
+    """
+    Send an approval request to the parent MAVIS process over real stdout,
+    and wait for a response line on real stdin.
+    """
+    try:
+        payload = json.dumps({
+            "__oni_ipc__": True,
+            "type": "approval_request",
+            "description": description,
+        })
+        sys.__stdout__.write(payload + "\n")
+        sys.__stdout__.flush()
+        line = sys.__stdin__.readline()
+        if not line:
+            return False
+        resp = json.loads(line.strip())
+        return bool(resp.get("approved", False))
+    except Exception:
+        return False
 
 
 def _emit(status: int, result) -> None:
@@ -33,8 +57,8 @@ def _emit(status: int, result) -> None:
         payload = json.dumps([status, result], default=str)
     except Exception:
         payload = json.dumps([status, str(result)])
-    _real_stdout.write(payload + "\n")
-    _real_stdout.flush()
+    sys.__stdout__.write(payload + "\n")
+    sys.__stdout__.flush()
 
 
 def main() -> None:
