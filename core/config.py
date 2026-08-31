@@ -69,6 +69,13 @@ _DEFAULTS: dict = {
         "emotion_strength_threshold": 0.75,
         "intent_strength_threshold": 0.85,
         "lt_intent_threshold": 0.90,
+        "working_memory_active_turns": 8,
+        "compact_token_threshold": 1500,
+        "max_memory_entry_chars": 600,
+        "tool_retrieval_threshold": 8,
+        "tool_retrieval_top_k": 6,
+        "general_tool_threshold": 0.75,
+        "specific_tools_top_k": 5,
     },
 
     "toolbuilder": {

@@ -80,10 +80,9 @@ def run():
                 continue  # already processed
 
             latest_ts = max(latest_ts, ts)
-            content = entry.get("content", "")
-            intent_strength = entry.get("intent_strength", 0.0)
+            directive = entry.get("directive", entry.get("intent_strength", 0.0) > 0.85)
 
-            promote, ltype = should_promote_long_term(intent_strength, content)
+            promote, ltype = should_promote_long_term(directive, content)
             if promote:
                 lt_entry = {
                     "id": entry.get("id", str(uuid.uuid4())),
@@ -91,8 +90,8 @@ def run():
                     "timestamp": ts,
                     "date": entry.get("date", fname.replace(".json", "")),
                     "emotion": entry.get("emotion", "neutral"),
-                    "emotion_strength": entry.get("emotion_strength", 0.0),
-                    "intent_strength": intent_strength,
+                    "emotion_strength": entry.get("emotion_strength", "low"),
+                    "directive": directive,
                     "source_file": fname,
                 }
                 _store.write_long_term(lt_entry, ltype)

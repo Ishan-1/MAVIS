@@ -22,6 +22,7 @@ from core.output import (
 )
 
 from core.llm import get_llm_client, BaseLLMClient
+from core.tool_retriever import ToolRetriever
 
 __all__ = [
     "cfg",
@@ -29,6 +30,7 @@ __all__ = [
     "TaskRunner",
     "get_llm_client",
     "BaseLLMClient",
+    "ToolRetriever",
     "mavis_answer",
     "mavis_status",
     "mavis_ok",

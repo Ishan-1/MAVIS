@@ -85,8 +85,8 @@ def run():
                 "content": turn["content"],
                 "timestamp": turn["timestamp"],
                 "emotion": turn.get("emotion", "neutral"),
-                "emotion_strength": turn.get("emotion_strength", 0.0),
-                "intent_strength": turn.get("intent_strength", 0.0),
+                "emotion_strength": turn.get("emotion_strength", "low"),
+                "directive": turn.get("directive", False),
                 "promotion_reason": reason,
                 "embedding": turn.get("embedding"),  # pass cached vector
             }
@@ -120,12 +120,12 @@ def _promotion_reason(
     Return a non-empty reason string if the turn qualifies for promotion,
     or an empty string otherwise.
     """
-    emo = turn.get("emotion_strength", 0.0)
-    intent = turn.get("intent_strength", 0.0)
+    emo = turn.get("emotion_strength", "low")
+    directive = turn.get("directive", turn.get("intent_strength", 0.0) > 0.85)
 
-    # Trigger 1 & 2: emotion / intent classifier thresholds
-    if should_promote_short_term(emo, intent):
-        return f"classifier(emo={emo:.2f},intent={intent:.2f})"
+    # Trigger 1 & 2: emotion / directive classifier
+    if should_promote_short_term(emo, directive):
+        return f"classifier(emo={emo},directive={directive})"
 
     # Trigger 3: repetition
     rep_count = _repetition_count(turn, all_recent, rep_threshold)

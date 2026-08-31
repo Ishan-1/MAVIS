@@ -1,8 +1,13 @@
 from dotenv import load_dotenv
-from prompts.prompt_templates import interpreter_prompt
+from prompts.prompt_templates import (
+    interpreter_prompt,
+    interpreter_system_prompt,
+    format_interpreter_user_prompt,
+)
 from tool_builder import ToolBuilder
 from core.scheduler import TaskRunner
 from core.llm import get_llm_client
+from core.tool_retriever import ToolRetriever
 from memories.memory_store import MemoryStore
 from memories.emotion_classifier import parse_classifier_fields
 from core.output import (
@@ -27,6 +32,7 @@ load_dotenv()
 llm = get_llm_client()
 tool_builder = ToolBuilder(llm)
 memory_store = MemoryStore(llm, namespace="interpreter")
+tool_retriever = ToolRetriever(llm)
 
 # ── Central config + ONI ────────────────────────────────────────────────────────────
 from core.config import cfg
@@ -120,11 +126,12 @@ class MavisSlashCompleter(Completer):
                 for sig, desc in commands_list.items():
                     func_name = sig.split("(")[0].strip()
                     if func_name.startswith(sub_prefix):
+                        desc_str = desc.get("description", "") if isinstance(desc, dict) else str(desc)
                         yield Completion(
                             func_name,
                             start_position=-len(sub_prefix),
                             display=func_name,
-                            display_meta=desc[:35] + ("..." if len(desc) > 35 else ""),
+                            display_meta=desc_str[:35] + ("..." if len(desc_str) > 35 else ""),
                         )
 
 
@@ -606,23 +613,27 @@ def interpret_command(command: str) -> bool:
     if handle_slash_command(command):
         return
 
-    # 0. Retrieve memory context
+    # 0. Retrieve memory context (bounded and truncated)
     context = memory_store.retrieve_context(command)
-    context_block = (
-        f"\n\n### Memory context\n{context}\n\n" if context.strip() else ""
-    )
 
-    # 1. LLM interpretation
-    prompt_text = interpreter_prompt.format(
+    # 1. Filter tools dynamically (Strategy 3)
+    active_tools = tool_retriever.get_relevant_tools(command, commands_list)
+    commands_str = json.dumps(active_tools, indent=2)
+
+    # 2. Build user turn adhering to stable prefix ordering (Tools -> Context -> Input)
+    user_prompt = format_interpreter_user_prompt(
+        commands_list_str=commands_str,
+        memory_context=context,
         user_input=command,
-        commands_list=json.dumps(commands_list, indent=4),
     )
-    if context_block:
-        prompt_text = context_block + prompt_text
 
     try:
         with spinner("Interpreting..."):
-            response = llm.generate(prompt_text, json_mode=True)
+            response = llm.generate(
+                user_prompt,
+                json_mode=True,
+                system_instruction=interpreter_system_prompt,
+            )
         mavis_debug(response, entity="interpreter")
         response_dict = json.loads(response)
     except json.JSONDecodeError:
@@ -633,14 +644,14 @@ def interpret_command(command: str) -> bool:
         mavis_error(f"LLM call failed: {e}")
         return
 
-    emotion, emotion_strength, intent_strength = parse_classifier_fields(response_dict)
+    emotion, emotion_strength, directive = parse_classifier_fields(response_dict)
 
     memory_store.add_turn(
         role="user",
         content=command,
         emotion=emotion,
         emotion_strength=emotion_strength,
-        intent_strength=intent_strength,
+        directive=directive,
     )
 
     # 0. Check for direct context response (memory recall, stored facts, preferences)
@@ -652,7 +663,7 @@ def interpret_command(command: str) -> bool:
             content=direct,
             emotion=emotion,
             emotion_strength=emotion_strength,
-            intent_strength=intent_strength,
+            directive=directive,
         )
         return
 
@@ -669,8 +680,12 @@ def interpret_command(command: str) -> bool:
 
             mavis_status(f"Building '{func_name}': {signature}")
             try:
-                tool_builder.build_tool(signature, description)
-                commands_list[func_name] = description
+                gen_score = tool_builder.build_tool(signature, description) or "repurposable"
+                commands_list[func_name] = {
+                    "description": description,
+                    "generalizability": gen_score,
+                }
+                tool_retriever.index_tool(signature, description, generalizability=gen_score)
                 mavis_ok(f"Built '{func_name}'.")
             except Exception as e:
                 mavis_error(f"Couldn't build '{func_name}': {e}. See logs/tool_builder.log.")
@@ -683,7 +698,7 @@ def interpret_command(command: str) -> bool:
                 content=command,
                 emotion=emotion,
                 emotion_strength=emotion_strength,
-                intent_strength=intent_strength,
+                directive=directive,
                 tool_failure=True,
             )
             _notify("MAVIS: Tool Build Failed", "One or more tools could not be built. See logs/tool_builder.log.")

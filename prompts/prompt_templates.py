@@ -6,10 +6,10 @@ You can take either one of the following actions:
 After taking the action, analyze current context and provide any modifications or additions to the context to be saved for future reference.
 Context: {context}
 """
-interpreter_prompt="""
-**SYSTEM PROMPT:**
+interpreter_system_prompt = """**SYSTEM PROMPT:**
 You are an intelligent task planner. Your task is to interpret a `USER INPUT` and a `COMMANDS LIST` (a JSON object of available functions and their descriptions).
 Your goal is to decompose the user's request into an executable **Directed Acyclic Graph (DAG)**, represented as a `pipeline` of nodes. You must also identify any functions required to build this pipeline that are **not** present in the `COMMANDS LIST`.
+
 **Instructions:**
 1.  **Check context first:** If the USER INPUT can be fully answered from the `MEMORY CONTEXT` (e.g., a fact recall, stored preference, or "remember that..." request), set `direct_response` to a complete answer and leave `pipeline` and `missing_commands` empty. Do NOT build a tool or pipeline for things already in memory.
 2.  **Analyze Intent:** Understand the user's final objective from the `USER INPUT`.
@@ -24,46 +24,46 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
       * ENSURE that the params have the correct name as per the function signature. The return type must be a single value or a tuple with the first element being the status code (0 for success, -1 for failure) and the rest for the result.
       * CREATE A MINIMAL DAG with least amount of new functions.
 5.  **Handle Dependencies:**
-      * The `params` for a node can be a static value from the `USER INPUT` (e.g., `"France"`).
+      * The `params` for a node can be a static value from the `USER INPUT` (e.g., "France").
       * To create the DAG, a parameter can also be a **dynamic reference** to the output of a previous node. Use the format `"$node_id.output"` for the whole result, or `"$node_id.field_name"` to extract a specific field from a dict result.
-6.  **Emotion & Intent Classifier:** Analyse the emotional tone and directive strength of the USER INPUT and populate the three classifier fields in the output:
+6.  **Emotion & Directive Classifier:** Analyse the emotional tone and directive nature of the USER INPUT:
       * `emotion`: one of frustration, excitement, urgency, sadness, neutral.
-      * `emotion_strength`: float 0–1, how strongly that emotion is present.
-      * `intent_strength`: float 0–1, how strongly the input contains a directive to change behaviour or remember something.
+      * `emotion_strength`: "low", "medium", or "high".
+      * `directive`: boolean — true if the input contains an explicit preference, rule, or instruction to remember or change behaviour permanently; false otherwise.
 7.  **Final Output:** Produce a single JSON object adhering strictly to the `OUTPUT FORMAT`.
 
 **OUTPUT FORMAT:**
 
 ```json
-{{
+{
   "direct_response": null,
   "pipeline": [
-    {{
+    {
       "id": "node_id",
       "function_name": "function_name_for_step_1",
-      "params": {{
+      "params": {
         "param1_name": "static_value_from_input"
-      }}
-    }},
-    {{
+      }
+    },
+    {
       "id": "node_id_2",
       "function_name": "function_name_for_step_2",
-      "params": {{
+      "params": {
         "param1_name": "$node_id.output",
         "param2_name": "$node_id.specific_field"
-      }}
-    }}
+      }
+    }
   ],
   "missing_commands": [
-    {{
+    {
       "description": "A clear description of what this new function does.",
       "signature": "new_function_name(param1: type, param2: type)"
-    }}
+    }
   ],
   "emotion": "neutral",
-  "emotion_strength": 0.0,
-  "intent_strength": 0.0
-}}
+  "emotion_strength": "low",
+  "directive": false
+}
 ```
 
 -----
@@ -71,64 +71,72 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
 ### EXAMPLES:
 
 **USER INPUT:**
-`"What is the population of the capital of Germany?"`
+"What is the population of the capital of Germany?"
 
 **COMMANDS LIST:**
 
 ```json
-{{
+{
     "get_population": "Get the population of a given city. (signature: get_population(city: str) -> tuple[int, int])",
     "send_email": "Sends an email. (signature: send_email(to: str, body: str) -> tuple[int, bool])"
-}}
+}
 ```
 
 **EXPECTED OUTPUT:**
 
 ```json
-{{
+{
+  "direct_response": null,
   "pipeline": [
-    {{
+    {
       "id": "n1",
       "function_name": "get_capital_city",
-      "params": {{
+      "params": {
         "country": "Germany"
-      }}
-    }},
-    {{
+      }
+    },
+    {
       "id": "n2",
-      "function_name": "get_capital_city",
-      "params": {{
-        "country": "Germany"
-      }}
-    }},
-    {{
-      "id": "n3",
       "function_name": "get_population",
-      "params": {{
+      "params": {
         "city": "$n1.output"
-      }}
-    }}
+      }
+    }
   ],
   "missing_commands": [
-    {{
+    {
       "description": "Gets the capital city of a specified country.",
       "signature": "get_capital_city(country: str) -> tuple[int,str]"
-    }}
+    }
   ],
   "emotion": "neutral",
-  "emotion_strength": 0.05,
-  "intent_strength": 0.1
-}}
-```
+  "emotion_strength": "low",
+  "directive": false
+}
+```"""
 
-COMMANDS LIST:
-```json
-{commands_list}
-```
 
-USER INPUT:
-{user_input}
-"""
+def format_interpreter_user_prompt(commands_list_str: str, memory_context: str, user_input: str) -> str:
+    """
+    Construct the dynamic user turn payload adhering to stable prefix ordering:
+    1. Available Commands (semi-static)
+    2. Memory Context (dynamic)
+    3. User Input (dynamic final turn)
+    """
+    parts = []
+    if commands_list_str.strip():
+        parts.append(f"### COMMANDS LIST:\n```json\n{commands_list_str}\n```")
+    if memory_context.strip():
+        parts.append(f"### MEMORY CONTEXT:\n{memory_context}")
+    parts.append(f"### USER INPUT:\n{user_input}")
+    return "\n\n".join(parts)
+
+
+# Backward-compatibility template for monolithic calls
+interpreter_prompt = (
+    interpreter_system_prompt
+    + "\n\nCOMMANDS LIST:\n```json\n{commands_list}\n```\n\nUSER INPUT:\n{user_input}\n"
+)
 
 builder_prompt="""
 Your task is to build a Python function given the function signature and the description of the function.
@@ -156,12 +164,16 @@ SECURITY RULES — MANDATORY, NON-NEGOTIABLE:
     from oni import call_fs
     status, result = call_fs("read"/"write"/"delete", path, data)
 - You MAY still use `requests` as a fallback ONLY if call_network is insufficient for the task,
-  but this will be flagged by the security scanner and should be avoided.
+- Classify "generalizability" as exactly one of:
+    * "generalizable": universal foundational utility (e.g., datetime, text/json parsing, file I/O, formatters)
+    * "repurposable": reusable across a domain (e.g., news search, web scraper, email client)
+    * "specialized": bespoke, single-purpose logic for a narrow task
 
 Follow the JSON output format exactly:
 {{
         "requirements": [package1, package2, ...],
         "env": [VAR_1, VAR_2],
+        "generalizability": "generalizable",
         "code": "The complete function code as a string"
 }}
 

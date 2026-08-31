@@ -160,7 +160,10 @@ class ToolBuilder:
                 return ""
 
             # Quick LLM selection of relevant reference tools
-            commands_summary = "\n".join([f"- {sig}: {desc}" for sig, desc in commands.items()])
+            commands_summary = "\n".join([
+                f"- {sig}: {desc.get('description', '') if isinstance(desc, dict) else desc}"
+                for sig, desc in commands.items()
+            ])
             ref_prompt = (
                 f"You are helping build a new Python tool with signature: `{func_sig}`\n"
                 f"Description: `{func_desc}`\n\n"
@@ -222,6 +225,18 @@ class ToolBuilder:
         log_it(f"Build LLM response: {response_raw}", self.entity_name)
         response = json.loads(response_raw)
         tool_code = response["code"]
+        raw_gen = str(response.get("generalizability", "repurposable")).strip().lower()
+        if raw_gen in ("generalizable", "repurposable", "specialized"):
+            generalizability = raw_gen
+        else:
+            try:
+                f_val = float(raw_gen)
+                generalizability = (
+                    "generalizable" if f_val >= 0.75 else ("repurposable" if f_val >= 0.4 else "specialized")
+                )
+            except (ValueError, TypeError):
+                generalizability = "repurposable"
+
         self.write_tool(response["requirements"], response["env"], tool_code)
 
         # ── 2. Generate test ───────────────────────────────────────────
@@ -241,7 +256,7 @@ class ToolBuilder:
                     f"Tool '{func_name}' passed tests on attempt {attempt}.",
                     self.entity_name,
                 )
-                self._register_tool(func_sig, func_desc)
+                self._register_tool(func_sig, func_desc, generalizability=generalizability)
 
                 # Specialized Memory: Record successful pattern or debug fix
                 try:
@@ -254,7 +269,7 @@ class ToolBuilder:
                 except Exception as e:
                     log_it(f"Failed to record memory in ToolBuilder: {e}", self.entity_name)
 
-                return
+                return generalizability
 
             # Test failed
             tb = str(result)
@@ -329,11 +344,14 @@ class ToolBuilder:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _register_tool(self, func_sig: str, func_desc: str):
+    def _register_tool(self, func_sig: str, func_desc: str, generalizability: str = "repurposable"):
         """Add a successfully tested tool to data/commands_list.json."""
         with open("data/commands_list.json", "r") as f:
             commands = json.load(f)
-        commands[func_sig] = func_desc
+        commands[func_sig] = {
+            "description": func_desc,
+            "generalizability": generalizability,
+        }
         with open("data/commands_list.json", "w") as f:
             json.dump(commands, f, indent=4)
         log_it(f"Tool '{func_sig}' registered in commands_list.", self.entity_name)

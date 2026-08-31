@@ -66,6 +66,15 @@ def _top_k() -> int:
 def _st_ttl_days() -> int:
     return cfg.memory.get("short_term_ttl_days", 7)
 
+def _working_memory_active_turns() -> int:
+    return cfg.memory.get("working_memory_active_turns", 8)
+
+def _compact_token_threshold() -> int:
+    return cfg.memory.get("compact_token_threshold", 1500)
+
+def _max_memory_entry_chars() -> int:
+    return cfg.memory.get("max_memory_entry_chars", 600)
+
 # ── Path helpers ─────────────────────────────────────────────────────────────
 _BASE = os.path.join(os.path.dirname(__file__))
 
@@ -176,9 +185,10 @@ class MemoryStore:
         role: str,
         content: str,
         emotion: str = "neutral",
-        emotion_strength: float = 0.0,
-        intent_strength: float = 0.0,
+        emotion_strength: str = "low",
+        directive: bool = False,
         tool_failure: bool = False,
+        intent_strength: float | None = None,
     ):
         """
         Append a turn to working memory and check the token cap.
@@ -189,6 +199,10 @@ class MemoryStore:
         """
         embedding = embed(content, self._client)
 
+        resolved_directive = (
+            directive if intent_strength is None else (directive or intent_strength > 0.85)
+        )
+
         turn = {
             "id": str(uuid.uuid4()),
             "role": role,
@@ -196,7 +210,7 @@ class MemoryStore:
             "timestamp": time.time(),
             "emotion": emotion,
             "emotion_strength": emotion_strength,
-            "intent_strength": intent_strength,
+            "directive": resolved_directive,
             "tool_failure": tool_failure,
             "embedding": embedding,  # cached here — never re-embedded
         }
@@ -239,8 +253,12 @@ class MemoryStore:
         query_vec = embed(query, self._client)
         sections: list[str] = []
 
+        max_chars = _max_memory_entry_chars()
+        def _truncate(text: str) -> str:
+            return text[:max_chars] + "... [truncated]" if len(text) > max_chars else text
+
         # Long-term top-K for this namespace
-        lt_entries = self._query_chroma(self._lt_col, query_vec, k)
+        lt_entries = [_truncate(e) for e in self._query_chroma(self._lt_col, query_vec, k)]
         if lt_entries:
             sections.append(f"### Long-term memories ({self.namespace})")
             sections.extend(lt_entries)
@@ -256,7 +274,7 @@ class MemoryStore:
                             name=f"{extra_ns}_long_term",
                             metadata={"hnsw:space": "cosine"},
                         )
-                        peer_entries = self._query_chroma(peer_col, query_vec, k)
+                        peer_entries = [_truncate(e) for e in self._query_chroma(peer_col, query_vec, k)]
                         if peer_entries:
                             sections.append(f"### Reference memories ({extra_ns})")
                             sections.extend(peer_entries)
@@ -267,18 +285,32 @@ class MemoryStore:
         cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=_st_ttl_days())).strftime(
             "%Y-%m-%d"
         )
-        st_entries = self._query_chroma(
-            self._st_col, query_vec, k, where={"date": {"$gte": cutoff}}
-        )
+        st_entries = [
+            _truncate(e)
+            for e in self._query_chroma(
+                self._st_col, query_vec, k, where={"date": {"$gte": cutoff}}
+            )
+        ]
         if st_entries:
             sections.append(f"### Short-term memories ({self.namespace}, last {_st_ttl_days()} days)")
             sections.extend(st_entries)
 
-        # Full working memory for this namespace
+        # Working memory: bounded active turns + session summaries
+        max_active = _working_memory_active_turns()
         with self._lock:
-            wm_lines = [
-                f"[{t['role']}] {t['content']}" for t in self._working
+            summaries = [
+                f"[summary] {_truncate(t['content'])}"
+                for t in self._working
+                if t.get("role") == "system"
             ]
+            recent_turns = [
+                t for t in self._working if t.get("role") != "system"
+            ][-max_active:]
+            recent_lines = [
+                f"[{t['role']}] {_truncate(t['content'])}" for t in recent_turns
+            ]
+            wm_lines = summaries + recent_lines
+
         if wm_lines:
             sections.append(f"### Working memory ({self.namespace} session)")
             sections.extend(wm_lines)
@@ -397,7 +429,7 @@ class MemoryStore:
     # ── Compaction (called under lock) ────────────────────────────────────────
 
     def _token_budget(self) -> int:
-        return min(_max_token(), int(0.4 * _context_window()))
+        return int(0.5 * _max_token())
 
     def _working_tokens(self) -> int:
         return sum(_token_count(t["content"]) for t in self._working)
@@ -440,8 +472,8 @@ class MemoryStore:
             "content": summary_text,
             "timestamp": time.time(),
             "emotion": "neutral",
-            "emotion_strength": 0.0,
-            "intent_strength": 0.0,
+            "emotion_strength": "low",
+            "directive": False,
             "tool_failure": False,
         }
         # Write summary to short-term (releases lock is fine — write_short_term

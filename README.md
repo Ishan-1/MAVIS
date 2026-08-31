@@ -71,6 +71,17 @@ A security boundary that gates all filesystem, system, and network access:
 - **Process Isolation**: All tools run inside independent Python subprocesses managed by `core/run_tool.py`.
 - **Append-Only Audit Log**: Every security decision logged to `logs/oni_audit.jsonl`.
 
+### 4. Token Optimization & Tool Categorization (`core/tool_retriever.py`)
+MAVIS is architected to minimize token overhead and maximize prompt caching:
+- **Stable Prefix Ordering**: Static system instructions (`interpreter_system_prompt`) are passed via native `system_instruction` headers. Dynamic user turns follow a deterministic order (`COMMANDS LIST` $\to$ `MEMORY CONTEXT` $\to$ `USER INPUT`), unlocking provider-level prompt caching (Gemini Context Caching, OpenAI Prompt Caching).
+- **Categorical Tool Generalizability**: Tools in `data/commands_list.json` are classified into three distinct categories:
+  - **`generalizable`**: Universal primitives and glue tools (datetime, parsing, file reading, state). **Always passed in full** to eliminate missing-primitive hallucinations during multi-step DAG planning.
+  - **`repurposable`**: Reusable domain utilities (news search, web scrapers, email).
+  - **`specialized`**: Bespoke, single-purpose tools for narrow tasks.
+  - Domain tools (`repurposable` + `specialized`) are dynamically retrieved via ChromaDB cosine similarity down to a configurable top-K (default: 5).
+- **Proactive Memory Compaction**: Working memory injection is capped to the last 8 turns with automatic compaction triggered at `0.5 * max_token` to maintain a lean context window.
+- **Discrete Emotion & Directive Classifiers**: Replaced noisy continuous floats with discrete levels (`"low" | "medium" | "high"`) and a clean boolean `directive: bool` for persistent instructions.
+
 ---
 
 ## Setup & Quickstart
@@ -164,7 +175,14 @@ All application configuration is managed centrally in **[`data/mavis_config.json
         "max_token": 12000,
         "top_k": 5,
         "short_term_ttl_days": 7,
-        "session_timeout_minutes": 30
+        "session_timeout_minutes": 30,
+        "working_memory_active_turns": 8,
+        "compact_token_threshold": 1500,
+        "max_memory_entry_chars": 600,
+        "tool_retrieval_threshold": 8,
+        "tool_retrieval_top_k": 6,
+        "general_tool_threshold": 0.75,
+        "specific_tools_top_k": 5
     },
     "toolbuilder": {
         "max_retries": 3,
@@ -192,6 +210,7 @@ MAV/
 │   ├── output.py             # Rich console formatting & UI theme
 │   ├── scheduler.py          # Background task scheduler
 │   ├── run_tool.py           # Subprocess harness for sandboxed tool execution
+│   ├── tool_retriever.py     # Categorical & semantic tool retrieval engine
 │   └── llm/                  # Provider-agnostic LLM subsystem
 │       ├── __init__.py       # get_llm_client() factory
 │       ├── base.py           # BaseLLMClient interface
@@ -212,7 +231,7 @@ MAV/
 │   └── tasks/                # Background job histories (events.json, Chroma)
 ├── data/
 │   ├── mavis_config.json     # Master configuration file
-│   ├── commands_list.json    # Tool signature registry
+│   ├── commands_list.json    # Tool registry with generalizability classes
 │   └── user_profile.json     # User preferences & profile information
 ├── docs/                     # Specifications and architectural documentation
 │   ├── bugs.md               # Tracked issues & resolution history
