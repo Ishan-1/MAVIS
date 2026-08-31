@@ -30,5 +30,9 @@
     "run_shell_command(command: str) -> tuple[int, str]": {
         "description": "Executes a shell command directly in the system's terminal.",
         "generalizability": "generalizable"
+    },
+    "read_and_concatenate_files(filenames: list[str]) -> tuple[int, str]": {
+        "description": "Reads the content of multiple specified files and concatenates them into a single string.",
+        "generalizability": "generalizable"
     }
 }

@@ -52,9 +52,13 @@ _DEFAULTS: dict = {
             "curl", "wget", "pip",
         ],
         "url_blacklist": [],
-        "approved_fs_write_paths": ["tools/", "tests/", "memories/", "logs/", "data/"],
+        "approved_fs_write_paths": ["tools/", "tests/", "memories/", "logs/", "data/", "agents/"],
         "approved_fs_files": ["requirements.txt"],
         "tool_execution_timeout_seconds": 30,
+    },
+
+    "agentbuilder": {
+        "max_retries": 3,
     },
 
     "memory": {

@@ -109,6 +109,8 @@ class ONI:
         greylisted: list[str] = []
 
         for node in pipeline:
+            if node.get("type") == "subagent":
+                continue
             command = node.get("function_name", "")
             params = node.get("params", {})
             decision = "allow" if command in self.session_allowances else classify_command(command, self.config, trust)

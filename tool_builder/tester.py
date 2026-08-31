@@ -67,8 +67,16 @@ class ToolTester:
 
         try:
             import importlib.util
+            import sys
+
+            # Evict cached modules from sys.modules so debugged files are reloaded from disk
+            for mod in (f"tools.{func_name}", func_name, "test_module"):
+                if mod in sys.modules:
+                    del sys.modules[mod]
+
             spec = importlib.util.spec_from_file_location("test_module", test_file_path)
             test_module = importlib.util.module_from_spec(spec)
+            sys.modules["test_module"] = test_module
             spec.loader.exec_module(test_module)
 
             test_function = getattr(test_module, f"test_{func_name}", None)

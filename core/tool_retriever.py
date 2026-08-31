@@ -96,20 +96,23 @@ class ToolRetriever:
         if not commands_dict:
             return
 
-        existing_ids = set(self._col.get(include=[])["ids"])
-        for key, val in commands_dict.items():
-            tool_id = self._tool_id(key)
-            if isinstance(val, dict):
-                desc_text = val.get("description", "")
-                gen_class = val.get("generalizability") or self._generalizability_cache.get(tool_id, "repurposable")
-            else:
-                desc_text = str(val)
-                gen_class = self._generalizability_cache.get(tool_id, "repurposable")
+        try:
+            existing_ids = set(self._col.get(include=[])["ids"])
+            for key, val in commands_dict.items():
+                tool_id = self._tool_id(key)
+                if isinstance(val, dict):
+                    desc_text = val.get("description", "")
+                    gen_class = val.get("generalizability") or self._generalizability_cache.get(tool_id, "repurposable")
+                else:
+                    desc_text = str(val)
+                    gen_class = self._generalizability_cache.get(tool_id, "repurposable")
 
-            if tool_id not in existing_ids:
-                self.index_tool(key, desc_text, generalizability=gen_class)
-            else:
-                self._generalizability_cache[tool_id] = normalize_generalizability_class(gen_class)
+                if tool_id not in existing_ids:
+                    self.index_tool(key, desc_text, generalizability=gen_class)
+                else:
+                    self._generalizability_cache[tool_id] = normalize_generalizability_class(gen_class)
+        except Exception as exc:
+            log_it(f"Warning: tool sync failed: {exc}", _ENTITY)
 
     def index_tool(
         self,

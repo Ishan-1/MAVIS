@@ -137,6 +137,7 @@ class MemoryStore:
             "interpreter": ("behaviours.json", "facts.json"),
             "toolbuilder": ("patterns.json",),
             "debugger": ("fixes.json",),
+            "agent_debugger": ("fixes.json",),
             "tasks": ("events.json",),
         }.get(namespace, ("facts.json",))
 
@@ -288,7 +289,7 @@ class MemoryStore:
         st_entries = [
             _truncate(e)
             for e in self._query_chroma(
-                self._st_col, query_vec, k, where={"date": {"$gte": cutoff}}
+                self._st_col, query_vec, k, min_date=cutoff
             )
         ]
         if st_entries:
@@ -386,6 +387,11 @@ class MemoryStore:
         """Helper to write a tool debugging fix pair."""
         content = f"Tool Debug Fix [{tool_name}]: Error: {error_snippet}\nFix: {fix_summary}"
         self.write_long_term({"content": content, "tool": tool_name}, ltype="fix")
+
+    def write_agent_fix(self, agent_name: str, failure_mode: str, fix_summary: str):
+        """Helper to write an agent prompt/constraint debugging fix pair."""
+        content = f"Agent Debug Fix [{agent_name}]: Failure Mode: {failure_mode}\nPrompt Remedy: {fix_summary}"
+        self.write_long_term({"content": content, "agent": agent_name}, ltype="fix")
 
     # ── Cursor helpers for background workers ─────────────────────────────────
 
@@ -520,19 +526,33 @@ class MemoryStore:
         query_vec: list[float],
         top_k: int,
         where: dict | None = None,
+        min_date: str | None = None,
     ) -> list[str]:
         """Query a ChromaDB collection and return the document strings."""
         try:
             kwargs: dict = {
                 "query_embeddings": [query_vec],
-                "n_results": top_k,
-                "include": ["documents"],
+                "n_results": top_k if not min_date else max(top_k * 2, 10),
+                "include": ["documents", "metadatas"],
             }
             if where:
                 kwargs["where"] = where
             results = collection.query(**kwargs)
             docs = results.get("documents", [[]])[0]
-            return [d for d in docs if d]
+            metas = results.get("metadatas", [[]])[0] if results.get("metadatas") else []
+
+            filtered_docs = []
+            for i, d in enumerate(docs):
+                if not d:
+                    continue
+                if min_date and metas and i < len(metas) and metas[i]:
+                    entry_date = metas[i].get("date", "")
+                    if entry_date and entry_date < min_date:
+                        continue
+                filtered_docs.append(d)
+                if len(filtered_docs) >= top_k:
+                    break
+            return filtered_docs
         except Exception as exc:
             log_it(f"ChromaDB query failed: {exc}", _ENTITY)
             return []

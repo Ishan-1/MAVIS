@@ -1,42 +1,56 @@
-# Python cache
+# Python cache & build artifacts
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.so
+*.egg-info/
+*.dist-info/
+.Python
+.pytest_cache/
 
-# Virtual environment (project root is the venv)
+# Virtual environment (project root is the venv or standard envs)
 bin/
 include/
 lib/
 lib64
 pyvenv.cfg
+.venv/
+venv/
+env/
 
 # Environment & secrets
 .env
-.mavis_*
-*.bin
-# Tools
-tools/
+
 # Logs
 logs/
 
-# Auto-generated test files
+# Database & ChromaDB data
+*.sqlite3
+*.bin
+memories/**/chroma/
+data/tools_chroma/
+
+# Auto-generated tools & test files
+tools/
 tests/
 
 # Memory persistence & runtime data
-memories/**/chroma/
 memories/**/.cursor
 memories/**/working_memory.json
 memories/**/json/*.json
 !memories/**/json/.gitkeep
+data/.mavis_*
+.mavis_*
 
 # Vosk model zip (large binary, model dir is needed but zip is not)
 models/
 
-
-# IDE / OS
+# IDE / OS / Editor swap files
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-
+*.swp
+*~
+#*#

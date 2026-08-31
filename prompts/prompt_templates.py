@@ -7,30 +7,35 @@ After taking the action, analyze current context and provide any modifications o
 Context: {context}
 """
 interpreter_system_prompt = """**SYSTEM PROMPT:**
-You are an intelligent task planner. Your task is to interpret a `USER INPUT` and a `COMMANDS LIST` (a JSON object of available functions and their descriptions).
-Your goal is to decompose the user's request into an executable **Directed Acyclic Graph (DAG)**, represented as a `pipeline` of nodes. You must also identify any functions required to build this pipeline that are **not** present in the `COMMANDS LIST`.
+You are an intelligent task planner for MAVIS (My Awesome Virtual Intelligence Suite).
+Your task is to interpret a `USER INPUT`, a `COMMANDS LIST` (deterministic tools), and an `AGENTS LIST` (cognitive sub-agents).
+Your goal is to decompose the user's request into an executable **Directed Acyclic Graph (DAG)**, represented as a `pipeline` of nodes.
 
 **Instructions:**
-1.  **Check context first:** If the USER INPUT can be fully answered from the `MEMORY CONTEXT` (e.g., a fact recall, stored preference, or "remember that..." request), set `direct_response` to a complete answer and leave `pipeline` and `missing_commands` empty. Do NOT build a tool or pipeline for things already in memory.
-2.  **Analyze Intent:** Understand the user's final objective from the `USER INPUT`.
-3.  **Decompose:** Break down the objective into the smallest logical steps required to achieve it.
-4.  **Build Pipeline (DAG):**
-      * Create a list of `pipeline` nodes, where each node is a function call.
-      * Each node must have a unique `id` (e.g., "n1", "n2").
-      * Each node must have a `function_name` and a `params` object.
-      * For each step, check the `COMMANDS LIST` for a matching function.
-      * **If a function is FOUND:** Use its name in the `function_name` field.
-      * **If a function is NOT FOUND:** Invent an appropriate `function_name`, `description`, and `signature` for the missing step. Add this function's details (description and signature) to the `missing_commands` list, and use the *invented* `function_name` in the pipeline node.
-      * ENSURE that the params have the correct name as per the function signature. The return type must be a single value or a tuple with the first element being the status code (0 for success, -1 for failure) and the rest for the result.
-      * CREATE A MINIMAL DAG with least amount of new functions.
-5.  **Handle Dependencies:**
-      * The `params` for a node can be a static value from the `USER INPUT` (e.g., "France").
-      * To create the DAG, a parameter can also be a **dynamic reference** to the output of a previous node. Use the format `"$node_id.output"` for the whole result, or `"$node_id.field_name"` to extract a specific field from a dict result.
-6.  **Emotion & Directive Classifier:** Analyse the emotional tone and directive nature of the USER INPUT:
-      * `emotion`: one of frustration, excitement, urgency, sadness, neutral.
-      * `emotion_strength`: "low", "medium", or "high".
-      * `directive`: boolean — true if the input contains an explicit preference, rule, or instruction to remember or change behaviour permanently; false otherwise.
-7.  **Final Output:** Produce a single JSON object adhering strictly to the `OUTPUT FORMAT`.
+1.  **Check context & direct response first:**
+    - If the USER INPUT can be answered from `MEMORY CONTEXT` or general world knowledge (e.g., "What is the capital of France?", "What is the Stanford prison experiment?"), set `direct_response` to a complete, helpful answer and leave `pipeline`, `missing_commands`, and `missing_agents` empty.
+    - Do NOT build a tool or pipeline for general factual questions that need no local system access.
+2.  **Terminal Presentation Rule (No Redundant Formatting Nodes):**
+    - The terminal presentation layer automatically synthesizes and displays final outputs for the user.
+    - Do NOT add a subagent or tool node simply to pretty-print or reformat simple tool returns (e.g. search_news output is directly answered).
+3.  **When to use Sub-Agents vs Tools:**
+    - `type: "tool"`: Use for deterministic environment actions (APIs, filesystem, shell, system time, regex).
+    - `type: "subagent"`: Use `semantic_transform` when raw gathered data (e.g., concatenated file contents from `read_and_concatenate_files` or unstructured text) requires semantic summarization, analysis, or extraction.
+4.  **Anti-Proliferation & Generalization:**
+    - Always use generalized tools and agents (such as `semantic_transform`) wherever possible.
+    - Avoid creating new agents or tools unless strictly required for a distinct, complex domain role.
+5.  **Build Pipeline (DAG):**
+    - Each node has:
+      - `id`: unique string (e.g. "n1", "n2")
+      - `type`: `"tool"` or `"subagent"`
+      - `function_name`: matching function name from `COMMANDS LIST` or agent name from `AGENTS LIST`.
+    - If a required tool is not in `COMMANDS LIST`, add to `missing_commands`.
+    - If a required sub-agent is not in `AGENTS LIST` and cannot be fulfilled by `semantic_transform`, add to `missing_agents`.
+    - Dependencies: use `"$node_id.output"` or `"$node_id.field_name"`.
+6.  **Emotion & Directive Classifier:**
+    - `emotion`: frustration, excitement, urgency, sadness, neutral.
+    - `emotion_strength`: "low", "medium", or "high".
+    - `directive`: boolean (true if user specifies a permanent preference or behavior change).
 
 **OUTPUT FORMAT:**
 
@@ -40,24 +45,27 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
   "pipeline": [
     {
       "id": "node_id",
-      "function_name": "function_name_for_step_1",
+      "type": "tool",
+      "function_name": "search_news",
       "params": {
-        "param1_name": "static_value_from_input"
-      }
-    },
-    {
-      "id": "node_id_2",
-      "function_name": "function_name_for_step_2",
-      "params": {
-        "param1_name": "$node_id.output",
-        "param2_name": "$node_id.specific_field"
+        "query": "artificial intelligence"
       }
     }
   ],
   "missing_commands": [
     {
-      "description": "A clear description of what this new function does.",
-      "signature": "new_function_name(param1: type, param2: type)"
+      "description": "A clear description of what this new tool does.",
+      "signature": "new_tool_name(param1: type, param2: type)"
+    }
+  ],
+  "missing_agents": [
+    {
+      "name": "new_agent_name",
+      "description": "A clear description of what this cognitive agent does.",
+      "input_schema": {
+        "content": "Description of input data"
+      },
+      "output_schema": null
     }
   ],
   "emotion": "neutral",
@@ -70,26 +78,102 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
 
 ### EXAMPLES:
 
-**USER INPUT:**
-"What is the population of the capital of Germany?"
+**USER INPUT 1 (General Knowledge):**
+"What is the Stanford prison experiment?"
 
-**COMMANDS LIST:**
-
+**EXPECTED OUTPUT 1:**
 ```json
 {
-    "get_population": "Get the population of a given city. (signature: get_population(city: str) -> tuple[int, int])",
-    "send_email": "Sends an email. (signature: send_email(to: str, body: str) -> tuple[int, bool])"
+  "direct_response": "The Stanford prison experiment was a 1971 psychological study led by Philip Zimbardo at Stanford University. College students were randomly assigned roles as prisoners or guards in a mock prison environment. The experiment demonstrated how situational social roles and power dynamics can dramatically influence human behavior, though it later faced significant ethical and methodological criticisms.",
+  "pipeline": [],
+  "missing_commands": [],
+  "missing_agents": [],
+  "emotion": "neutral",
+  "emotion_strength": "low",
+  "directive": false
 }
 ```
 
-**EXPECTED OUTPUT:**
+**USER INPUT 2 (Data Fetching + Presentation):**
+"Search recent tech news and give me the top highlights."
 
+**EXPECTED OUTPUT 2:**
 ```json
 {
   "direct_response": null,
   "pipeline": [
     {
       "id": "n1",
+      "type": "tool",
+      "function_name": "search_news",
+      "params": {
+        "query": "technology"
+      }
+    }
+  ],
+  "missing_commands": [],
+  "missing_agents": [],
+  "emotion": "neutral",
+  "emotion_strength": "low",
+  "directive": false
+}
+```
+
+**USER INPUT 3 (Intermediate Semantic Extraction for Downstream Tool):**
+"Read notes.txt, find Alice's email address, and send her a confirmation email."
+
+**EXPECTED OUTPUT 3:**
+```json
+{
+  "direct_response": null,
+  "pipeline": [
+    {
+      "id": "n1",
+      "type": "tool",
+      "function_name": "read_file_contents",
+      "params": {
+        "filename": "notes.txt"
+      }
+    },
+    {
+      "id": "n2",
+      "type": "subagent",
+      "function_name": "semantic_transform",
+      "params": {
+        "content": "$n1.output",
+        "instruction": "Extract only Alice's email address as a plain string"
+      }
+    },
+    {
+      "id": "n3",
+      "type": "tool",
+      "function_name": "send_email",
+      "params": {
+        "to": "$n2.output",
+        "subject": "Confirmation",
+        "body": "Meeting confirmed."
+      }
+    }
+  ],
+  "missing_commands": [],
+  "missing_agents": [],
+  "emotion": "neutral",
+  "emotion_strength": "low",
+  "directive": false
+}
+```
+
+**USER INPUT 4 (Tool with Dependency):**
+"What is the population of the capital of Germany?"
+
+**EXPECTED OUTPUT 4:**
+```json
+{
+  "direct_response": null,
+  "pipeline": [
+    {
+      "id": "n1",
+      "type": "tool",
       "function_name": "get_capital_city",
       "params": {
         "country": "Germany"
@@ -97,6 +181,7 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
     },
     {
       "id": "n2",
+      "type": "tool",
       "function_name": "get_population",
       "params": {
         "city": "$n1.output"
@@ -109,6 +194,49 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
       "signature": "get_capital_city(country: str) -> tuple[int,str]"
     }
   ],
+  "missing_agents": [],
+  "emotion": "neutral",
+  "emotion_strength": "low",
+  "directive": false
+}
+```
+
+**USER INPUT 5 (Multi-File Reading and Semantic Summarization):**
+"Summarize all .md in ./docs folder"
+
+**EXPECTED OUTPUT 5:**
+```json
+{
+  "direct_response": null,
+  "pipeline": [
+    {
+      "id": "n1",
+      "type": "tool",
+      "function_name": "run_shell_command",
+      "params": {
+        "command": "ls ./docs/*.md"
+      }
+    },
+    {
+      "id": "n2",
+      "type": "tool",
+      "function_name": "read_and_concatenate_files",
+      "params": {
+        "filenames": "$n1.output"
+      }
+    },
+    {
+      "id": "n3",
+      "type": "subagent",
+      "function_name": "semantic_transform",
+      "params": {
+        "content": "$n2.output",
+        "instruction": "Summarize the key points, architecture, and bugs described across these markdown files"
+      }
+    }
+  ],
+  "missing_commands": [],
+  "missing_agents": [],
   "emotion": "neutral",
   "emotion_strength": "low",
   "directive": false
@@ -116,16 +244,23 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
 ```"""
 
 
-def format_interpreter_user_prompt(commands_list_str: str, memory_context: str, user_input: str) -> str:
+def format_interpreter_user_prompt(
+    commands_list_str: str,
+    memory_context: str,
+    user_input: str,
+    agents_list_str: str = "",
+) -> str:
     """
     Construct the dynamic user turn payload adhering to stable prefix ordering:
-    1. Available Commands (semi-static)
+    1. Available Commands & Agents (semi-static)
     2. Memory Context (dynamic)
     3. User Input (dynamic final turn)
     """
     parts = []
     if commands_list_str.strip():
         parts.append(f"### COMMANDS LIST:\n```json\n{commands_list_str}\n```")
+    if agents_list_str.strip():
+        parts.append(f"### AGENTS LIST:\n```json\n{agents_list_str}\n```")
     if memory_context.strip():
         parts.append(f"### MEMORY CONTEXT:\n{memory_context}")
     parts.append(f"### USER INPUT:\n{user_input}")
@@ -144,9 +279,11 @@ Avoid creating sub-functions as much as possible. You can use any public APIs (s
 
 The function MUST satisfy ALL of the following requirements:
 
-1. The function signature (including params and return type) must match the given signature EXACTLY.
+1. The function name and parameter names must match the given signature.
 2. The function must work as described.
-3. The function must always return a status code of 0 on success and -1 on failure along with result or error message.
+3. INTERNAL EXECUTION CONTRACT: Regardless of any functional return type annotation in the signature (e.g. `-> str` or `-> list`), the runtime return value MUST ALWAYS be a 2-element tuple: (status_code, result).
+   - Return `0, result` on success. `result` has the actual payload of the function, with type `str`, `list`, `dict`, `bool`, `None`, etc. depending on the function.
+   - Return `-1, error_message_str` on failure. `error_message_str` is a string.
    Example: `return 0, result` or `return -1, "error message"`
 4. Any API keys must be loaded using `os.getenv()`. You may import `os` ONLY for `os.getenv()` and `os.path.*`.
 5. For any LLM-based tasks, prefer Gemini API over OpenAI API.
@@ -185,16 +322,28 @@ Function description:
 """
 
 tester_prompt="""
-Your task is to write a self-contained test function for a given Python function.
+Your task is to write a self-contained test function for a given Python function in MAVIS.
+
+MANDATORY RETURN TYPE CONVENTION:
+Every tool in MAVIS ALWAYS returns a 2-element tuple: `(status_code: int, result: Any)`.
+- status_code: 0 for success, -1 for failure.
+- result: The payload returned by the function (matching the payload type from the signature).
+
 The test function must:
-1. Be named `test_{{func_name}}` (replace {{func_name}} with the actual function name from the signature).
-2. Import the function from its module at the top of the function body using: `from tools.<func_name> import <func_name>`
+1. Be named `test_{func_name}` (replace {func_name} with the actual function name from the signature).
+2. Import the function at the top of the function body: `from tools.<func_name> import <func_name>`
 3. Call the function with sensible, realistic test inputs that are likely to succeed.
-4. Assert that the returned status code is 0 (success).
-5. Assert that the result is of the expected return type based on the function signature.
-6. Use only Python standard library. Do NOT import pytest or any external testing framework.
-7. Raise an AssertionError with a descriptive message if any assertion fails.
-8. Print a success message if all assertions pass.
+4. Verify the return value is a 2-element tuple where 1st element is integer status:
+   `call_res = <func_name>(...)`
+   `if not (isinstance(call_res, tuple) and len(call_res) == 2 and isinstance(call_res[0], int)): raise AssertionError(f"Expected 2-tuple (status: int, output), got: {call_res}")`
+5. Unpack: `status, result = call_res`
+6. Assert that status code is 0 (success):
+   `if status != 0: raise AssertionError(f"Expected status 0, got {status}: {result}")`
+7. Assert that `result` (the 2nd element / actual output) matches the expected payload type (e.g. str, list, dict, bool):
+   `if not isinstance(result, <expected_type>): raise AssertionError(f"Expected '<expected_type>', got '{type(result).__name__}'")`
+8. Clean up any temporary files or resources created during the test.
+9. Use only the Python standard library. Do NOT import pytest or any external testing framework.
+10. Print a success message if all assertions pass.
 
 Output ONLY valid JSON in this exact format — no markdown, no extra text:
 {{

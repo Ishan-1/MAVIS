@@ -1,0 +1,6 @@
+{
+    "semantic_transform(content: Any, instruction: str) -> tuple[int, Any]": {
+        "description": "Transforms, extracts, filters, or structures input content according to a specific semantic instruction.",
+        "generalizability": "generalizable"
+    }
+}

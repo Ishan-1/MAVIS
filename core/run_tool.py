@@ -87,7 +87,15 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        status, result = func(**params_dict)
+        raw_res = func(**params_dict)
+        if isinstance(raw_res, tuple) and len(raw_res) == 2 and isinstance(raw_res[0], int):
+            status, result = raw_res
+        else:
+            status = -1
+            result = (
+                f"Tool '{func_name}' contract violation: expected tuple[int, Any] (status, output), "
+                f"but received {type(raw_res).__name__}: {raw_res!r}"
+            )
         _emit(status, result)
     except TypeError as e:
         _emit(-1, f"Incorrect parameters for '{func_name}': {e}")

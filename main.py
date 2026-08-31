@@ -32,6 +32,11 @@ import time
 load_dotenv()
 llm = get_llm_client()
 tool_builder = ToolBuilder(llm)
+from agent_builder import AgentBuilder
+from core.answerer import Answerer
+from core.agents import load_agent
+agent_builder = AgentBuilder(llm)
+answerer = Answerer(llm)
 memory_store = MemoryStore(llm, namespace="interpreter")
 tool_retriever = ToolRetriever(llm)
 
@@ -42,6 +47,14 @@ from oni import oni as _oni
 commands_list = {}
 with open("data/commands_list.json", "r") as file:
     commands_list = json.load(file)
+
+agents_list = {}
+if os.path.exists("data/agents_list.json"):
+    try:
+        with open("data/agents_list.json", "r") as file:
+            agents_list = json.load(file)
+    except Exception:
+        agents_list = {}
 
 _MAV_ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -605,7 +618,7 @@ def call_command(command_name, params_dict):
 
 # ── Pipeline execution ────────────────────────────────────────────────────────
 
-def execute_pipeline(pipeline):
+def execute_pipeline(pipeline, query: str = "", context: str = ""):
     """
     Execute a list of pipeline nodes in order, resolving dependencies.
 
@@ -636,11 +649,12 @@ def execute_pipeline(pipeline):
 
     for node in sorted_pipeline:
         node_id = node["id"]
+        node_type = node.get("type", "tool")
         command_name = node["function_name"]
         params = node["params"]
         resolved_params = {}
 
-        mavis_status(f"Running step '{node_id}': {command_name}")
+        mavis_status(f"Running step '{node_id}' ({node_type}): {command_name}")
 
         try:
             for param_name, param_value in params.items():
@@ -653,20 +667,42 @@ def execute_pipeline(pipeline):
                             f"'{dep_node_id}' which didn't complete."
                         )
                         return
-                    dep_result = node_results[dep_node_id]
-                    if len(parts) == 2 and isinstance(dep_result, dict):
-                        resolved_params[param_name] = dep_result.get(parts[1], dep_result)
+                    dep_payload = node_results[dep_node_id]
+                    if len(parts) == 2:
+                        field = parts[1]
+                        if field == "output":
+                            resolved_params[param_name] = dep_payload
+                        elif field == "status":
+                            resolved_params[param_name] = 0
+                        elif isinstance(dep_payload, dict) and field in dep_payload:
+                            resolved_params[param_name] = dep_payload[field]
+                        else:
+                            resolved_params[param_name] = dep_payload
                     else:
-                        resolved_params[param_name] = dep_result
+                        resolved_params[param_name] = dep_payload
                 else:
                     resolved_params[param_name] = param_value
 
-            status, result = call_command(command_name, resolved_params)
+            if node_type == "subagent":
+                agent = load_agent(command_name, llm)
+                if not agent:
+                    mavis_error(f"Pipeline aborted: subagent '{command_name}' not found.")
+                    return
+                status, result = agent.run(**resolved_params)
+            else:
+                status, result = call_command(command_name, resolved_params)
+
+            # Contract verification: 1st element MUST be int status code, 2nd is output
+            if not isinstance(status, int):
+                mavis_error(f"Step '{node_id}' ({command_name}) returned invalid status type: {type(status).__name__}. Aborting pipeline.")
+                return
 
             if status == 0:
+                # 2nd element is the actual output received
                 node_results[node_id] = result
             else:
-                mavis_error(f"Step '{node_id}' ({command_name}) failed. Aborting pipeline.")
+                # Proper error handling: non-zero status aborts pipeline with error payload
+                mavis_error(f"Step '{node_id}' ({command_name}) failed with status {status}: {result}. Aborting pipeline.")
                 return
 
         except Exception as e:
@@ -676,10 +712,12 @@ def execute_pipeline(pipeline):
     elapsed = time.time() - _pipeline_start
     mavis_status("Pipeline finished.")
     if node_results and pipeline:
-        final_node_id = pipeline[-1]["id"]
-        final_result = node_results.get(final_node_id)
-        if final_result is not None:
-            mavis_answer(str(final_result))
+        final_answer = answerer.synthesize(
+            query=query,
+            pipeline_results=node_results,
+            memory_context=context,
+        )
+        mavis_answer(final_answer)
 
     # Fire notification if the pipeline took longer than the configured threshold
     threshold = cfg.output.get("notify_pipeline_threshold_s", 5)
@@ -701,15 +739,25 @@ def interpret_command(command: str) -> bool:
         return True
 
     # 0. Retrieve memory context (bounded and truncated)
-    context = memory_store.retrieve_context(command)
+    try:
+        context = memory_store.retrieve_context(command)
+    except Exception as exc:
+        mavis_debug(f"Memory retrieval failed: {exc}", entity="interpreter")
+        context = ""
 
     # 1. Filter tools dynamically (Strategy 3)
-    active_tools = tool_retriever.get_relevant_tools(command, commands_list)
+    try:
+        active_tools = tool_retriever.get_relevant_tools(command, commands_list)
+    except Exception as exc:
+        mavis_debug(f"Tool retrieval failed: {exc}", entity="interpreter")
+        active_tools = commands_list
     commands_str = json.dumps(active_tools, indent=2)
+    agents_str = json.dumps(agents_list, indent=2)
 
-    # 2. Build user turn adhering to stable prefix ordering (Tools -> Context -> Input)
+    # 2. Build user turn adhering to stable prefix ordering (Tools -> Agents -> Context -> Input)
     user_prompt = format_interpreter_user_prompt(
         commands_list_str=commands_str,
+        agents_list_str=agents_str,
         memory_context=context,
         user_input=command,
     )
@@ -754,7 +802,7 @@ def interpret_command(command: str) -> bool:
         )
         return True
 
-    # 2. Build missing commands
+    # 2a. Build missing commands (tools)
     missing = response_dict.get("missing_commands", [])
     tool_failure = False
     if missing:
@@ -795,13 +843,75 @@ def interpret_command(command: str) -> bool:
             mavis_ok("All missing tools built successfully.")
             mavis_status("Proceeding with pipeline execution.")
 
+    # 2b. Build missing agents
+    missing_agents = response_dict.get("missing_agents", [])
+    if missing_agents:
+        mavis_status(f"Building {len(missing_agents)} missing cognitive agent(s)...")
+        all_agents_built = True
+        for new_agent in missing_agents:
+            if isinstance(new_agent, str):
+                agent_name = new_agent.split("(")[0].strip()
+                description = f"Cognitive sub-agent {agent_name}"
+                input_schema = {"content": "Any"}
+                output_schema = None
+            elif isinstance(new_agent, dict):
+                agent_name = (
+                    new_agent.get("name")
+                    or new_agent.get("agent_name")
+                    or new_agent.get("function_name")
+                    or (new_agent.get("signature", "").split("(")[0].strip() if new_agent.get("signature") else None)
+                )
+                description = new_agent.get("description", "")
+                input_schema = new_agent.get("input_schema", {"content": "Any"})
+                output_schema = new_agent.get("output_schema")
+            else:
+                agent_name = None
+
+            if not agent_name:
+                mavis_error(f"Could not determine agent name from specification: {new_agent}")
+                all_agents_built = False
+                continue
+
+            mavis_status(f"Building agent '{agent_name}'...")
+            try:
+                gen_score = agent_builder.build_agent(
+                    agent_name=agent_name,
+                    agent_description=description,
+                    input_schema=input_schema,
+                    output_schema=output_schema,
+                )
+                sig = f"{agent_name}(...) -> tuple[int, Any]"
+                agents_list[sig] = {
+                    "description": description,
+                    "generalizability": gen_score,
+                }
+                mavis_ok(f"Built agent '{agent_name}'.")
+            except Exception as e:
+                mavis_error(f"Couldn't build agent '{agent_name}': {e}. See logs/oni_audit.jsonl.")
+                all_agents_built = False
+
+        if not all_agents_built:
+            memory_store.add_turn(
+                role="user",
+                content=command,
+                emotion=emotion,
+                emotion_strength=emotion_strength,
+                directive=directive,
+                tool_failure=True,
+            )
+            _notify("MAVIS: Agent Build Failed", "One or more sub-agents could not be built.")
+            mavis_error("Some agents failed to build. Pipeline execution skipped.")
+            return True
+        else:
+            mavis_ok("All missing agents built successfully.")
+
     # 3. Execute the pipeline (ONI pre-flight inside execute_pipeline)
     pipeline = response_dict.get("pipeline", [])
     if not pipeline:
         mavis_status("No executable pipeline in the response.")
         return True
 
-    execute_pipeline(pipeline)
+    execute_pipeline(pipeline, query=command, context=context)
 
     # 4. Store assistant response in working memory
     pipeline_summary = ", ".join(
@@ -908,16 +1018,23 @@ if __name__ == "__main__":
                 continue
             if command.lower() in ["exit", "quit"]:
                 break
-            if not interpret_command(command):
-                break
+            try:
+                if not interpret_command(command):
+                    break
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                mavis_error(f"Error processing command: {e}")
 
             # Refresh heartbeat after each user interaction if interval reached
             now = time.time()
             if now - _last_heartbeat >= _HEARTBEAT_INTERVAL:
                 _write_heartbeat()
                 _last_heartbeat = now
-    except BaseException:
-        pass
+    except BaseException as e:
+        if not isinstance(e, (KeyboardInterrupt, SystemExit)):
+            import traceback
+            traceback.print_exc()
     finally:
         try:
             _stop_workers()
