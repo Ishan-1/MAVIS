@@ -611,7 +611,7 @@ def interpret_command(command: str) -> bool:
 
     # ── Slash command check ────────────────────────────────────────────────────
     if handle_slash_command(command):
-        return
+        return True
 
     # 0. Retrieve memory context (bounded and truncated)
     context = memory_store.retrieve_context(command)
@@ -639,10 +639,10 @@ def interpret_command(command: str) -> bool:
     except json.JSONDecodeError:
         mavis_error("I had trouble understanding that — try rephrasing.")
         mavis_debug(f"Raw LLM response: {response}", entity="interpreter")
-        return
+        return True
     except Exception as e:
         mavis_error(f"LLM call failed: {e}")
-        return
+        return True
 
     emotion, emotion_strength, directive = parse_classifier_fields(response_dict)
 
@@ -665,7 +665,7 @@ def interpret_command(command: str) -> bool:
             emotion_strength=emotion_strength,
             directive=directive,
         )
-        return
+        return True
 
     # 2. Build missing commands
     missing = response_dict.get("missing_commands", [])
@@ -703,7 +703,7 @@ def interpret_command(command: str) -> bool:
             )
             _notify("MAVIS: Tool Build Failed", "One or more tools could not be built. See logs/tool_builder.log.")
             mavis_error("Some tools failed to build. Pipeline execution skipped.")
-            return
+            return True
         else:
             mavis_ok("All missing tools built successfully.")
             mavis_status("Proceeding with pipeline execution.")
@@ -712,7 +712,7 @@ def interpret_command(command: str) -> bool:
     pipeline = response_dict.get("pipeline", [])
     if not pipeline:
         mavis_status("No executable pipeline in the response.")
-        return
+        return True
 
     execute_pipeline(pipeline)
 
@@ -725,6 +725,7 @@ def interpret_command(command: str) -> bool:
         role="assistant",
         content=f"Executed pipeline: {pipeline_summary}",
     )
+    return True
 
 
 # ── Worker subprocess management ──────────────────────────────────────────────────
