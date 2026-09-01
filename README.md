@@ -15,6 +15,9 @@ User Input (text)
 handle_slash_command()       ← intercepts /config, /trust, /allow, /block, etc.
       │  (if standard prompt)
       ▼
+cache_manager.check_cache()  ──► [Cache Hit >0.95] ─────────► Answerer.synthesize() (instant reply)
+      │                      └─► [Pipeline Hit 0.85-0.95] ─► Fast LLM verify ──► execute_pipeline()
+      ▼  (if miss)
 interpret_command()          ← LLM Client (Gemini / OpenAI / Ollama): decomposes into heterogeneous DAG
       │
       ├─ missing tools? ──► ToolBuilder.build_tool()
@@ -41,13 +44,19 @@ execute_pipeline()
       ├─ Dispatch nodes        ← runs "tool" (sandboxed subprocess) & "subagent" (in-memory LLM)
       │                          Strict execution contract: (status_code: int, output: Any)
       │
+      ├─ cache_manager.save()  ← Stores executed pipeline and generalized params to ChromaDB
+      │
       └─ Answerer.synthesize() ← Terminal presentation layer quarantines tool data and synthesizes final answer
 
-Background Daemons (Out-of-process workers)
+Background Daemons & Schedulers
 ─────────────────────────────────────────────────────────────────────────────
 worker_process (whitelist_only trust)
   ├─ short_term_worker   — every 15 min: promote high-signal dialogue turns to ChromaDB
   └─ long_term_worker    — every 8 h:   consolidate facts & behaviours into long-term JSON
+
+Main Process Schedulers
+  ├─ heartbeat           — every 1 min: health check pulse for workers
+  └─ cache_eviction      — every 5 min (TTL) / 60 min (LRU): pipeline cache cleanup
 ```
 
 ---
