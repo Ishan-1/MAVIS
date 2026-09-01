@@ -34,5 +34,13 @@
     "read_and_concatenate_files(filenames: list[str]) -> tuple[int, str]": {
         "description": "Reads the content of multiple specified files and concatenates them into a single string.",
         "generalizability": "generalizable"
+    },
+    "search_academic_papers(query: str) -> tuple[int, list]": {
+        "description": "Searches for academic papers and articles based on a query, without requiring an API key. Returns a list of relevant research papers, including titles, abstracts, and potentially links.",
+        "generalizability": "repurposable"
+    },
+    "write_file_contents(filename: str, content: str) -> tuple[int, bool]": {
+        "description": "Writes the given content to a specified file.",
+        "generalizability": "generalizable"
     }
 }

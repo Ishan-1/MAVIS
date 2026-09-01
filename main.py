@@ -28,6 +28,7 @@ import selectors
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 load_dotenv()
 llm = get_llm_client()
@@ -39,6 +40,7 @@ agent_builder = AgentBuilder(llm)
 answerer = Answerer(llm)
 memory_store = MemoryStore(llm, namespace="interpreter")
 tool_retriever = ToolRetriever(llm)
+from core.dag import validate_and_sort_dag, resolve_params
 
 # ── Central config + ONI ────────────────────────────────────────────────────────────
 from core.config import cfg
@@ -57,10 +59,12 @@ if os.path.exists("data/agents_list.json"):
         agents_list = {}
 
 _MAV_ROOT = os.path.dirname(os.path.abspath(__file__))
+_session_chat: list[dict[str, str]] = []
 
 # ── Readline tab-completion for slash commands ──────────────────────────────────
 _SLASH_SUBCOMMANDS = {
     "/help": [],
+    "/save": [],
     "/config": ["set", "save", "reload", "audit"],
     "/trust": ["ask", "yolo", "whitelist"],
     "/allow": [],
@@ -72,6 +76,7 @@ _SLASH_SUBCOMMANDS = {
 
 _COMMAND_METAS = {
     "/help": "Show available slash commands",
+    "/save": "Export current chat history to a markdown (.md) file",
     "/status": "Heartbeat, workers, scheduler, memory tokens",
     "/config": "Inspect or edit configuration",
     "/trust": "Switch ONI trust level (ask | yolo | whitelist)",
@@ -181,6 +186,7 @@ def _get_bottom_toolbar():
 
 _HELP_ROWS = [
     ("/help",                    "This help message."),
+    ("/save [file.md]",          "Export current chat history to a Markdown file."),
     ("/status",                  "Heartbeat, worker PIDs, scheduler tasks, memory usage."),
     ("/config",                  "Print current config."),
     ("/config save",             "Persist config to disk."),
@@ -193,6 +199,55 @@ _HELP_ROWS = [
     ("/greylist <cmd>",          "Add to ONI greylist."),
     ("/unlist <cmd>",            "Remove from all ONI lists."),
 ]
+
+
+def _save_chat_to_markdown(filename: str = "") -> None:
+    """Save the current session chat history to a Markdown file."""
+    filename = filename.strip()
+    if not filename:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"chat_{timestamp}.md"
+    elif not filename.endswith(".md"):
+        filename = f"{filename}.md"
+
+    entries = list(_session_chat)
+    if not entries:
+        wm = memory_store.get_working_memory()
+        for t in wm:
+            content = t.get("content", "")
+            role = t.get("role", "unknown")
+            ts = t.get("timestamp")
+            dt_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if isinstance(ts, (int, float)) else ""
+            if content.strip():
+                entries.append({"role": role, "content": content, "timestamp": dt_str})
+
+    if not entries:
+        mavis_warn("No chat history available in this session to save.")
+        return
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        "# MAVIS Chat Session",
+        f"**Exported:** {now_str}\n",
+        "---",
+        "",
+    ]
+
+    for entry in entries:
+        role_label = "User" if entry["role"] == "user" else "MAVIS"
+        ts_label = f" *({entry['timestamp']})*" if entry.get("timestamp") else ""
+        lines.append(f"### {role_label}{ts_label}")
+        lines.append(entry["content"].strip())
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines).strip() + "\n")
+        mavis_ok(f"Chat saved successfully to [bold]{filename}[/bold] ({len(entries)} turn(s)).")
+    except Exception as e:
+        mavis_error(f"Failed to save chat to '{filename}': {e}")
 
 
 def _oni_list_add(list_name: str, command: str) -> None:
@@ -228,6 +283,12 @@ def handle_slash_command(raw: str) -> bool:
         print_table(_HELP_ROWS)
         mavis_print("  [dim]Tip: type [bold]/[/bold] then Tab to browse commands.[/dim]")
         rule()
+        return True
+
+    # ── /save [filename] ──────────────────────────────────────────────────────
+    if verb == "/save":
+        filename = parts[1] if len(parts) > 1 else ""
+        _save_chat_to_markdown(filename)
         return True
 
     # ── /status ───────────────────────────────────────────────────────────────
@@ -620,13 +681,18 @@ def call_command(command_name, params_dict):
 
 def execute_pipeline(pipeline, query: str = "", context: str = ""):
     """
-    Execute a list of pipeline nodes in order, resolving dependencies.
+    Execute a list of pipeline nodes in topological sorted order, resolving dependencies.
 
-    ONI pre-flight scans the full pipeline before any node runs.
-    Blacklisted commands abort immediately. Greylisted commands are
-    presented to the user as a single batch prompt upfront.
+    Validates DAG structure (cycle detection and dangling references) and sorts
+    nodes topologically before execution.
+    ONI pre-flight scans the topologically sorted pipeline before any node runs.
     """
-    ok, issues = _oni.preflight_scan(pipeline)
+    sorted_pipeline, dag_err = validate_and_sort_dag(pipeline)
+    if dag_err:
+        mavis_error(f"Pipeline validation failed: {dag_err}")
+        return
+
+    ok, issues = _oni.preflight_scan(sorted_pipeline)
     if not ok:
         oni_print(f"Pipeline aborted: {'; '.join(issues)}")
         return
@@ -635,53 +701,21 @@ def execute_pipeline(pipeline, query: str = "", context: str = ""):
     mavis_status("Starting pipeline execution...")
     _pipeline_start = time.time()
 
-    # Topological sort for dependencies
-    try:
-        from graphlib import TopologicalSorter
-        ts = TopologicalSorter()
-        for node in pipeline:
-            deps = [v for v in node["params"].values() if isinstance(v, str) and v.startswith("$")]
-            ts.add(node["id"], *[d.split(".")[0][1:] for d in deps])
-        pipeline_order = list(ts.static_order())
-        sorted_pipeline = [n for node_id in pipeline_order for n in pipeline if n["id"] == node_id]
-    except ImportError:
-        sorted_pipeline = pipeline
-
     for node in sorted_pipeline:
         node_id = node["id"]
         node_type = node.get("type", "tool")
         command_name = node["function_name"]
-        params = node["params"]
-        resolved_params = {}
+        params = node.get("params", {})
 
         mavis_status(f"Running step '{node_id}' ({node_type}): {command_name}")
 
         try:
-            for param_name, param_value in params.items():
-                if isinstance(param_value, str) and param_value.startswith("$"):
-                    parts = param_value[1:].split(".", 1)
-                    dep_node_id = parts[0]
-                    if dep_node_id not in node_results:
-                        mavis_error(
-                            f"Pipeline aborted: step '{node_id}' depends on "
-                            f"'{dep_node_id}' which didn't complete."
-                        )
-                        return
-                    dep_payload = node_results[dep_node_id]
-                    if len(parts) == 2:
-                        field = parts[1]
-                        if field == "output":
-                            resolved_params[param_name] = dep_payload
-                        elif field == "status":
-                            resolved_params[param_name] = 0
-                        elif isinstance(dep_payload, dict) and field in dep_payload:
-                            resolved_params[param_name] = dep_payload[field]
-                        else:
-                            resolved_params[param_name] = dep_payload
-                    else:
-                        resolved_params[param_name] = dep_payload
-                else:
-                    resolved_params[param_name] = param_value
+            resolved_params, res_err = resolve_params(params, node_results)
+            if res_err:
+                mavis_error(
+                    f"Pipeline aborted: step '{node_id}' resolution error: {res_err}"
+                )
+                return
 
             if node_type == "subagent":
                 agent = load_agent(command_name, llm)
@@ -718,6 +752,11 @@ def execute_pipeline(pipeline, query: str = "", context: str = ""):
             memory_context=context,
         )
         mavis_answer(final_answer)
+        _session_chat.append({
+            "role": "assistant",
+            "content": final_answer,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
 
     # Fire notification if the pipeline took longer than the configured threshold
     threshold = cfg.output.get("notify_pipeline_threshold_s", 5)
@@ -737,6 +776,12 @@ def interpret_command(command: str) -> bool:
     # ── Slash command check ────────────────────────────────────────────────────
     if handle_slash_command(command):
         return True
+
+    _session_chat.append({
+        "role": "user",
+        "content": command,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
 
     # 0. Retrieve memory context (bounded and truncated)
     try:
@@ -793,6 +838,11 @@ def interpret_command(command: str) -> bool:
     direct = response_dict.get("direct_response")
     if direct and direct.strip():
         mavis_answer(direct)
+        _session_chat.append({
+            "role": "assistant",
+            "content": direct,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
         memory_store.add_turn(
             role="assistant",
             content=direct,
@@ -914,13 +964,14 @@ def interpret_command(command: str) -> bool:
     execute_pipeline(pipeline, query=command, context=context)
 
     # 4. Store assistant response in working memory
+    last_assistant_text = _session_chat[-1]["content"] if (_session_chat and _session_chat[-1]["role"] == "assistant") else ""
     pipeline_summary = ", ".join(
         f"{n.get('function_name')}({n.get('params', {})})"
         for n in pipeline
     )
     memory_store.add_turn(
         role="assistant",
-        content=f"Executed pipeline: {pipeline_summary}",
+        content=last_assistant_text or f"Executed pipeline: {pipeline_summary}",
     )
     return True
 

@@ -314,6 +314,8 @@ Follow the JSON output format exactly:
         "code": "The complete function code as a string"
 }}
 
+NOTE ON REQUIREMENTS: "requirements" is ONLY for external third-party pip packages. DO NOT include `oni` (built into MAVIS) or standard library modules.
+
 {reference_tools}
 Function signature:
 {function_signature}
@@ -322,7 +324,7 @@ Function description:
 """
 
 tester_prompt="""
-Your task is to write a self-contained test function for a given Python function in MAVIS.
+Your task is to write a self-contained pytest test function for a given Python function in MAVIS.
 
 MANDATORY RETURN TYPE CONVENTION:
 Every tool in MAVIS ALWAYS returns a 2-element tuple: `(status_code: int, result: Any)`.
@@ -330,20 +332,20 @@ Every tool in MAVIS ALWAYS returns a 2-element tuple: `(status_code: int, result
 - result: The payload returned by the function (matching the payload type from the signature).
 
 The test function must:
-1. Be named `test_{func_name}` (replace {func_name} with the actual function name from the signature).
-2. Import the function at the top of the function body: `from tools.<func_name> import <func_name>`
-3. Call the function with sensible, realistic test inputs that are likely to succeed.
-4. Verify the return value is a 2-element tuple where 1st element is integer status:
+1. Use ONLY pytest for writing tests (follow pytest conventions and standard assert statements).
+2. Be named `test_<func_name>` (replace <func_name> with the actual function name from the signature) and take no arguments: `def test_<func_name>():`.
+3. Import the function: `from tools.<func_name> import <func_name>`. You may `import pytest` if needed.
+4. Call the function with sensible, realistic test inputs that are likely to succeed.
+5. Verify the return value is a 2-element tuple where 1st element is integer status using `assert`:
    `call_res = <func_name>(...)`
-   `if not (isinstance(call_res, tuple) and len(call_res) == 2 and isinstance(call_res[0], int)): raise AssertionError(f"Expected 2-tuple (status: int, output), got: {call_res}")`
-5. Unpack: `status, result = call_res`
-6. Assert that status code is 0 (success):
-   `if status != 0: raise AssertionError(f"Expected status 0, got {status}: {result}")`
-7. Assert that `result` (the 2nd element / actual output) matches the expected payload type (e.g. str, list, dict, bool):
-   `if not isinstance(result, <expected_type>): raise AssertionError(f"Expected '<expected_type>', got '{type(result).__name__}'")`
-8. Clean up any temporary files or resources created during the test.
-9. Use only the Python standard library. Do NOT import pytest or any external testing framework.
-10. Print a success message if all assertions pass.
+   `assert isinstance(call_res, tuple) and len(call_res) == 2 and isinstance(call_res[0], int), f"Expected 2-tuple (status: int, output), got: {{call_res}}"`
+6. Unpack: `status, result = call_res`
+7. Assert that status code is 0 (success) using `assert`:
+   `assert status == 0, f"Expected status 0, got {{status}}: {{result}}"`
+8. Assert that `result` (the 2nd element / actual output) matches the expected payload type (e.g. str, list, dict, bool) using `assert`:
+   `assert isinstance(result, <expected_type>), f"Expected '<expected_type>', got '{{type(result).__name__}}'"`
+9. Clean up any temporary files or resources created during the test.
+10. Use ONLY pytest for testing. Do NOT use `unittest` or any other testing framework.
 
 Output ONLY valid JSON in this exact format — no markdown, no extra text:
 {{

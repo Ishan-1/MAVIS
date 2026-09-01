@@ -62,9 +62,20 @@ class ToolBuilder:
         if status != 0:
             existing = ""
 
-        new_packages = [req for req in requirements if req not in existing]
+        # Filter out internal repository modules and empty entries
+        internal_modules = {
+            "oni", "tools", "memories", "agent_builder",
+            "tool_builder", "pipeline", "prompts", "core", "data", "tests"
+        }
+        existing_pkgs = {line.strip().lower() for line in existing.splitlines() if line.strip()}
+        new_packages = [
+            req.strip() for req in requirements
+            if req.strip()
+            and req.strip().lower() not in existing_pkgs
+            and req.strip().lower() not in internal_modules
+        ]
         if not new_packages:
-            log_it(f"All requirements already present: {requirements}", self.entity_name)
+            log_it(f"All requirements already present or ignored: {requirements}", self.entity_name)
             return
 
         # Write updated requirements.txt (approved path)
@@ -331,13 +342,15 @@ class ToolBuilder:
 
     def build_tool_tests(self, func_sig: str, func_desc: str):
         """Generate and write a test file for the given function."""
+        func_name = func_sig.split("(")[0].strip()
         prompt = tester_prompt.format(
-            function_signature=func_sig, function_description=func_desc
+            function_signature=func_sig,
+            function_description=func_desc,
+            func_name=func_name,
         )
         response_raw = self._llm(prompt)
         log_it(f"Tester LLM response: {response_raw}", self.entity_name)
         test_code = json.loads(response_raw)["code"]
-        func_name = func_sig.split("(")[0].strip()
         self.write_tool_tests(func_name, test_code)
 
     # ------------------------------------------------------------------
