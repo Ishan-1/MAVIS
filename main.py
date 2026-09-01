@@ -41,6 +41,7 @@ answerer = Answerer(llm)
 memory_store = MemoryStore(llm, namespace="interpreter")
 tool_retriever = ToolRetriever(llm)
 from core.dag import validate_and_sort_dag, resolve_params
+from core.caching import cache_manager
 
 # ── Central config + ONI ────────────────────────────────────────────────────────────
 from core.config import cfg
@@ -763,6 +764,8 @@ def execute_pipeline(pipeline, query: str = "", context: str = ""):
     if elapsed >= threshold:
         _notify("MAVIS: Pipeline complete", f"Finished in {elapsed:.1f}s")
 
+    return node_results
+
 
 # ── Interpreter ───────────────────────────────────────────────────────────────
 
@@ -789,6 +792,30 @@ def interpret_command(command: str) -> bool:
     except Exception as exc:
         mavis_debug(f"Memory retrieval failed: {exc}", entity="interpreter")
         context = ""
+
+    # 0.5 Check Pipeline Cache
+    cache_hit = cache_manager.check_cache(command)
+    if cache_hit:
+        if cache_hit["ttl_valid"] and cache_hit["result"] is not None:
+            mavis_status("Cache hit (Result valid). Serving from cache.")
+            final_answer = answerer.synthesize(
+                query=command,
+                pipeline_results=cache_hit["result"],
+                memory_context=context,
+            )
+            mavis_answer(final_answer)
+            _session_chat.append({
+                "role": "assistant",
+                "content": final_answer,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            return True
+        else:
+            mavis_status("Cache hit (Pipeline valid, result expired). Re-running pipeline.")
+            res = execute_pipeline(cache_hit["pipeline"], query=command, context=context)
+            if res:
+                cache_manager.save_cache(command, cache_hit["pipeline"], res, 300, "generalized")
+            return True
 
     # 1. Filter tools dynamically (Strategy 3)
     try:
@@ -961,7 +988,11 @@ def interpret_command(command: str) -> bool:
         mavis_status("No executable pipeline in the response.")
         return True
 
-    execute_pipeline(pipeline, query=command, context=context)
+    res = execute_pipeline(pipeline, query=command, context=context)
+    if res:
+        ttl = response_dict.get("ttl", 300)
+        gen = response_dict.get("generalizability", "specialized")
+        cache_manager.save_cache(command, pipeline, res, ttl, gen)
 
     # 4. Store assistant response in working memory
     last_assistant_text = _session_chat[-1]["content"] if (_session_chat and _session_chat[-1]["role"] == "assistant") else ""
@@ -1040,6 +1071,8 @@ if __name__ == "__main__":
 
     runner = TaskRunner(tick_seconds=cfg.scheduler.get("tick_seconds", 30))
     runner.register(_write_heartbeat, interval_minutes=1, task_name="heartbeat")
+    runner.register(cache_manager.evict_expired, interval_minutes=5, task_name="cache_ttl_eviction")
+    runner.register(cache_manager.lru_evict, interval_minutes=60, task_name="cache_lru_eviction")
     runner.start()
 
     _write_heartbeat()

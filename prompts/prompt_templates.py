@@ -32,7 +32,10 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
     - If a required tool is not in `COMMANDS LIST`, add to `missing_commands`.
     - If a required sub-agent is not in `AGENTS LIST` and cannot be fulfilled by `semantic_transform`, add to `missing_agents`.
     - Dependencies: use `"$node_id.output"` or `"$node_id.field_name"`.
-6.  **Emotion & Directive Classifier:**
+6.  **Caching Parameters:**
+    - `ttl`: Output TTL (time-to-live) in seconds for the pipeline result. For volatile queries (e.g., current time, weather) use a short TTL (like 60). For static data (e.g., historical facts), use a large TTL (like 86400). Default is 300.
+    - `generalizability`: Specify if the generated pipeline is "generalized" (reusable with different parameters) or "specialized" (highly specific to the query).
+7.  **Emotion & Directive Classifier:**
     - `emotion`: frustration, excitement, urgency, sadness, neutral.
     - `emotion_strength`: "low", "medium", or "high".
     - `directive`: boolean (true if user specifies a permanent preference or behavior change).
@@ -68,6 +71,8 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
       "output_schema": null
     }
   ],
+  "ttl": 300,
+  "generalizability": "generalized",
   "emotion": "neutral",
   "emotion_strength": "low",
   "directive": false

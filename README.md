@@ -106,6 +106,15 @@ MAVIS provides full architectural symmetry between deterministic Python tools an
 - **`semantic_transform` Primitive**: A built-in universal sub-agent for ad-hoc unstructured extractions, filtering, and multi-document summarization.
 - **Terminal Answerer (`core/answerer.py`)**: A dedicated presentation module that synthesizes final pipeline answers for the user while quarantining raw tool returns inside `<tool_data>` blocks.
 
+### 6. Semantic Pipeline Caching (`core/caching.py`)
+MAVIS employs a multi-tiered semantic caching system using ChromaDB to save time and API costs on redundant queries:
+- **Vector-Based Retrieval**: Queries are embedded and checked against the `pipeline_cache_chroma` collection.
+- **Cache Hit Tiers**: 
+  - `> 0.95` similarity: Automatic cache hit; results are served instantly.
+  - `0.85 - 0.95` similarity: Triggers a fast LLM verification to ensure the cached pipeline logically satisfies the new query.
+- **Generalization**: Cached generalized pipelines can extract new parameters on-the-fly without rebuilding the entire DAG.
+- **Eviction Policies**: Employs TTL eviction to clear stale results (while keeping the reusable pipeline) and an LRU background task for overall capacity management.
+
 
 ---
 
@@ -231,6 +240,7 @@ MAV/
 ├── core/                     # Foundational runtime package
 │   ├── __init__.py           # Re-exports cfg, log_it, TaskRunner, get_llm_client
 │   ├── config.py             # Central config manager (MAVISConfig)
+│   ├── caching.py            # Semantic CacheManager using ChromaDB
 │   ├── answerer.py           # Presentation layer synthesizing final responses
 │   ├── helpers.py            # Structured logging (log_it)
 │   ├── output.py             # Rich console formatting & UI theme
