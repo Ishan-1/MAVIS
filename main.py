@@ -814,7 +814,13 @@ def interpret_command(command: str) -> bool:
             mavis_status("Cache hit (Pipeline valid, result expired). Re-running pipeline.")
             res = execute_pipeline(cache_hit["pipeline"], query=command, context=context)
             if res:
-                cache_manager.save_cache(command, cache_hit["pipeline"], res, 300, "generalized")
+                cache_manager.save_cache(
+                    command, 
+                    cache_hit["pipeline"], 
+                    res, 
+                    cache_hit.get("ttl", 300), 
+                    cache_hit.get("generalizability", "specialized")
+                )
             return True
 
     # 1. Filter tools dynamically (Strategy 3)

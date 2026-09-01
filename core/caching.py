@@ -111,12 +111,14 @@ class CacheManager:
                 if generalizability == "generalized" and similarity < 1.0:
                     final_pipeline = self._extract_parameters(query, cached_query, pipeline)
                 
+                ttl_seconds = max(0, ttl_timestamp - meta.get("inserted_at", int(time.time())))
+                
                 if ttl_valid and result is not None:
                     log_it(f"Full Cache Hit for '{query}' (similarity: {similarity:.2f})", _ENTITY)
-                    return {"pipeline": final_pipeline, "result": result, "ttl_valid": True}
+                    return {"pipeline": final_pipeline, "result": result, "ttl_valid": True, "ttl": ttl_seconds, "generalizability": generalizability}
                 else:
                     log_it(f"Pipeline Cache Hit for '{query}' (similarity: {similarity:.2f}), result expired", _ENTITY)
-                    return {"pipeline": final_pipeline, "result": None, "ttl_valid": False}
+                    return {"pipeline": final_pipeline, "result": None, "ttl_valid": False, "ttl": ttl_seconds, "generalizability": generalizability}
                     
             return None
             
