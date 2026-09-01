@@ -5,13 +5,16 @@ Base contract for cognitive sub-agents in MAVIS.
 from __future__ import annotations
 
 import json
+import time
 from abc import ABC, abstractmethod
 from typing import Any
 from core.helpers import log_it
 from core.llm.base import BaseLLMClient
+from core.metrics import MetricEmitter
 
 _ENTITY = "agent_base"
 _MAX_PAYLOAD_CHARS = 32000  # ~8,000 tokens safety guard
+_EMITTER = MetricEmitter("subagents")
 
 
 class BaseAgent(ABC):
@@ -34,9 +37,11 @@ class BaseAgent(ABC):
     def _apply_payload_guard(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """Guard against excessive input payload sizes to prevent context window blowup."""
         guarded = {}
+        self._last_payload_truncated = False
         for k, v in inputs.items():
             str_val = json.dumps(v) if not isinstance(v, str) else v
             if len(str_val) > _MAX_PAYLOAD_CHARS:
+                self._last_payload_truncated = True
                 log_it(
                     f"Agent '{self.name}': Input '{k}' exceeded {_MAX_PAYLOAD_CHARS} chars. Truncating.",
                     _ENTITY,
@@ -70,7 +75,7 @@ class BaseAgent(ABC):
         except Exception as e:
             return -1, f"Agent output validation error: {e}"
 
-    def run(self, **inputs) -> tuple[int, Any]:
+    def run(self, turn_id: str = "", **inputs) -> tuple[int, Any]:
         """
         Execute the agent on the given inputs.
 
@@ -78,8 +83,12 @@ class BaseAgent(ABC):
             (0, result) on success.
             (-1, error_message) on failure.
         """
+        t0 = time.perf_counter()
+        input_tokens = 0
+        output_tokens = 0
         try:
             guarded_inputs = self._apply_payload_guard(inputs)
+            truncated = getattr(self, "_last_payload_truncated", False)
             inputs_str = json.dumps(guarded_inputs, indent=2, default=str)
 
             # Untrusted data quarantine inside <tool_input> tags
@@ -93,6 +102,8 @@ class BaseAgent(ABC):
             )
 
             is_json = bool(self.output_schema)
+            input_tokens = len(prompt) // 4 + len(self.system_instruction) // 4
+
             raw_response = self.client.generate(
                 prompt,
                 json_mode=is_json,
@@ -100,10 +111,43 @@ class BaseAgent(ABC):
             )
 
             if not raw_response:
+                latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+                _EMITTER.log({
+                    "turn_id": turn_id,
+                    "agent_name": self.name,
+                    "latency_ms": latency_ms,
+                    "status": "error",
+                    "input_tokens": input_tokens,
+                    "output_tokens": 0,
+                    "payload_truncated": truncated,
+                })
                 return -1, f"Agent '{self.name}' returned an empty response."
 
-            return self._validate_output(raw_response)
+            output_tokens = len(raw_response) // 4
+            status_code, result = self._validate_output(raw_response)
+            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+
+            _EMITTER.log({
+                "turn_id": turn_id,
+                "agent_name": self.name,
+                "latency_ms": latency_ms,
+                "status": "success" if status_code == 0 else "error",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "payload_truncated": truncated,
+            })
+            return status_code, result
 
         except Exception as e:
             log_it(f"Agent '{self.name}' execution failed: {e}", _ENTITY)
+            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+            _EMITTER.log({
+                "turn_id": turn_id,
+                "agent_name": self.name,
+                "latency_ms": latency_ms,
+                "status": "error",
+                "input_tokens": input_tokens,
+                "output_tokens": 0,
+                "payload_truncated": truncated,
+            })
             return -1, f"Agent '{self.name}' failed: {e}"

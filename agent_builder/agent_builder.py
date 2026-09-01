@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from typing import Any
 from core.config import cfg
 from core.helpers import log_it
@@ -15,8 +16,10 @@ from core.agents import load_agent
 from agent_builder.tester import AgentTester
 from agent_builder.debugger import AgentDebugger
 from prompts.agent_prompt_templates import agent_builder_prompt
+from core.metrics import MetricEmitter
 
 _ENTITY = "agent_builder"
+_EMITTER = MetricEmitter("builders")
 
 
 class AgentBuildError(Exception):
@@ -120,6 +123,7 @@ class AgentBuilder:
         clean_name = agent_name.strip().lower()
         class_name = self._to_pascal_case(clean_name)
 
+        t0 = time.perf_counter()
         # ── 1. Query past agent debugger memories for priors ─────────────────────
         ref_context = ""
         try:
@@ -166,8 +170,21 @@ class AgentBuilder:
             status, test_result = self.tester.test_agent(agent_instance, test_cases=test_cases)
 
             if status == 0:
+                latency_ms = round((time.perf_counter() - t0) * 1000, 2)
                 log_it(f"Agent '{clean_name}' passed verification on attempt {attempt}.", _ENTITY)
                 self._register_agent(clean_name, agent_description, input_schema, generalizability)
+
+                _EMITTER.log({
+                    "target_name": clean_name,
+                    "builder_type": "agent",
+                    "latency_ms": latency_ms,
+                    "status": "passed",
+                    "attempt_count": attempt,
+                    "failure_reason": "none",
+                    "debugger_prior_used": ref_context != "",
+                    "input_tokens": len(prompt) // 4,
+                    "output_tokens": len(agent_code) // 4,
+                })
 
                 # Record successful repair in agent_debugger memory if fixed after retry
                 if attempt > 0:
@@ -208,6 +225,18 @@ class AgentBuilder:
             attempt += 1
 
         # ── 4. All Retries Exhausted ────────────────────────────────────────────
+        latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+        _EMITTER.log({
+            "target_name": clean_name,
+            "builder_type": "agent",
+            "latency_ms": latency_ms,
+            "status": "failed",
+            "attempt_count": attempt,
+            "failure_reason": str(last_failure_reason)[:100],
+            "debugger_prior_used": ref_context != "",
+            "input_tokens": len(prompt) // 4,
+            "output_tokens": 0,
+        })
         self._mark_needs_manual_fix(clean_name, last_failure_reason)
         raise AgentBuildError(
             f"Agent '{clean_name}' failed all {self.MAX_RETRIES} verification attempts. "

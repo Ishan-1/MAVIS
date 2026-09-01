@@ -14,10 +14,13 @@ from core.helpers import log_it
 from core.llm import get_llm_client, BaseLLMClient
 from memories.embedding import embed
 from core.config import cfg
+from core.metrics import MetricEmitter
 
 _ENTITY = "caching"
+_EMITTER = MetricEmitter("caching")
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CHROMA_PATH = os.path.join(_BASE_DIR, "data", "pipeline_cache_chroma")
+
 
 class CacheManager:
     """
@@ -67,11 +70,13 @@ class CacheManager:
             log_it(f"Parameter extraction failed: {e}", _ENTITY)
             return pipeline
 
-    def check_cache(self, query: str) -> dict | None:
+    def check_cache(self, query: str, turn_id: str = "") -> dict | None:
         """
         Check if the query matches a cached entry.
         Returns dict with 'pipeline' (and optionally 'result') if cache hit, else None.
+        Emits observability metrics to data/metrics/caching.csv.
         """
+        t0 = time.perf_counter()
         try:
             query_vec = embed(query, self._client)
             results = self._col.query(
@@ -81,6 +86,17 @@ class CacheManager:
             )
             
             if not results or not results.get("metadatas") or not results["metadatas"][0]:
+                latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+                _EMITTER.log({
+                    "turn_id": turn_id,
+                    "cache_status": "miss",
+                    "hit_tier": "miss",
+                    "similarity_score": 0.0,
+                    "llm_verify_result": "n/a",
+                    "ttl_valid": False,
+                    "latency_ms": latency_ms,
+                    "tokens_saved_estimate": 0,
+                })
                 return None
                 
             distances = results["distances"][0]
@@ -97,14 +113,29 @@ class CacheManager:
                 generalizability = meta.get("generalizability", "specialized")
                 
                 ttl_valid = time.time() < ttl_timestamp
+                llm_verify_result = "n/a"
                 
                 if similarity > 0.95:
-                    pass # Automatic hit
+                    hit_tier = "instant"
                 elif similarity >= 0.85:
-                    if not self._verify_cache_with_llm(query, cached_query, json.dumps(pipeline), ttl_valid):
+                    verified = self._verify_cache_with_llm(query, cached_query, json.dumps(pipeline), ttl_valid)
+                    llm_verify_result = "verified" if verified else "rejected"
+                    if not verified:
                         continue # Try next result
+                    hit_tier = "llm_verified"
                 else:
-                    return None # Distances are sorted ascending, so if this < 0.85, the rest are too
+                    latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+                    _EMITTER.log({
+                        "turn_id": turn_id,
+                        "cache_status": "miss",
+                        "hit_tier": "miss",
+                        "similarity_score": round(similarity, 3),
+                        "llm_verify_result": "n/a",
+                        "ttl_valid": False,
+                        "latency_ms": latency_ms,
+                        "tokens_saved_estimate": 0,
+                    })
+                    return None
                 
                 # Cache Hit Confirmed
                 final_pipeline = pipeline
@@ -112,6 +143,19 @@ class CacheManager:
                     final_pipeline = self._extract_parameters(query, cached_query, pipeline)
                 
                 ttl_seconds = max(0, ttl_timestamp - meta.get("inserted_at", int(time.time())))
+                latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+                tokens_saved = 800 if (ttl_valid and result is not None) else 350
+                
+                _EMITTER.log({
+                    "turn_id": turn_id,
+                    "cache_status": "hit",
+                    "hit_tier": hit_tier,
+                    "similarity_score": round(similarity, 3),
+                    "llm_verify_result": llm_verify_result,
+                    "ttl_valid": ttl_valid,
+                    "latency_ms": latency_ms,
+                    "tokens_saved_estimate": tokens_saved,
+                })
                 
                 if ttl_valid and result is not None:
                     log_it(f"Full Cache Hit for '{query}' (similarity: {similarity:.2f})", _ENTITY)
@@ -120,10 +164,32 @@ class CacheManager:
                     log_it(f"Pipeline Cache Hit for '{query}' (similarity: {similarity:.2f}), result expired", _ENTITY)
                     return {"pipeline": final_pipeline, "result": None, "ttl_valid": False, "ttl": ttl_seconds, "generalizability": generalizability}
                     
+            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+            _EMITTER.log({
+                "turn_id": turn_id,
+                "cache_status": "miss",
+                "hit_tier": "miss",
+                "similarity_score": 0.0,
+                "llm_verify_result": "rejected",
+                "ttl_valid": False,
+                "latency_ms": latency_ms,
+                "tokens_saved_estimate": 0,
+            })
             return None
             
         except Exception as e:
             log_it(f"Cache check failed: {e}", _ENTITY)
+            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+            _EMITTER.log({
+                "turn_id": turn_id,
+                "cache_status": "miss",
+                "hit_tier": "miss",
+                "similarity_score": 0.0,
+                "llm_verify_result": "n/a",
+                "ttl_valid": False,
+                "latency_ms": latency_ms,
+                "tokens_saved_estimate": 0,
+            })
             return None
 
     def save_cache(self, query: str, pipeline: list[dict], result: Any, ttl_seconds: int = 300, generalizability: str = "specialized"):

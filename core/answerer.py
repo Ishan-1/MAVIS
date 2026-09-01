@@ -7,11 +7,14 @@ with strict prompt injection boundaries around untrusted tool data.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 from core.helpers import log_it
 from core.llm.base import BaseLLMClient
+from core.metrics import MetricEmitter
 
 _ENTITY = "answerer"
+_EMITTER = MetricEmitter("answerer")
 
 
 class Answerer:
@@ -31,12 +34,15 @@ class Answerer:
         memory_context: str = "",
         emotion: str = "neutral",
         emotion_strength: str = "low",
+        turn_id: str = "",
     ) -> str:
         """
         Synthesize the final answer using the LLM.
         """
         if not pipeline_results:
             return "I completed the request, but no data was returned."
+
+        t0 = time.perf_counter()
 
         # Format results cleanly for presentation
         serialized_results = {}
@@ -73,6 +79,7 @@ class Answerer:
         )
 
         full_prompt = "\n\n".join(user_prompt_parts)
+        input_tokens = len(full_prompt) // 4 + len(system_instruction) // 4
 
         try:
             response = self.client.generate(
@@ -80,9 +87,28 @@ class Answerer:
                 json_mode=False,
                 system_instruction=system_instruction,
             )
-            return response.strip()
+            res_str = response.strip()
+            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+            output_tokens = len(res_str) // 4
+
+            _EMITTER.log({
+                "turn_id": turn_id,
+                "latency_ms": latency_ms,
+                "status": "success",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            })
+            return res_str
         except Exception as e:
             log_it(f"Answerer synthesis failed: {e}", _ENTITY)
+            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+            _EMITTER.log({
+                "turn_id": turn_id,
+                "latency_ms": latency_ms,
+                "status": "error",
+                "input_tokens": input_tokens,
+                "output_tokens": 0,
+            })
             # Fallback to last node output if LLM generation fails
             last_key = list(pipeline_results.keys())[-1]
             return str(pipeline_results[last_key])

@@ -6,3 +6,5 @@ schedule
 chromadb==1.5.9
 rich
 prompt_toolkit
+pandas
+streamlit

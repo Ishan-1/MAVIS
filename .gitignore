@@ -14,6 +14,9 @@ bin/
 include/
 lib/
 lib64
+lib64/
+etc/
+share/
 pyvenv.cfg
 .venv/
 venv/
@@ -24,6 +27,10 @@ env/
 
 # Logs
 logs/
+
+# Metrics & Telemetry runtime data
+data/metrics/*.csv
+!data/metrics/.gitkeep
 
 # Database & ChromaDB data
 *.sqlite3

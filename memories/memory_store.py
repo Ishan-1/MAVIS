@@ -50,8 +50,10 @@ from core.config import cfg
 from core.helpers import log_it
 from core.llm import get_llm_client, BaseLLMClient
 from memories.embedding import embed, cosine_similarity
+from core.metrics import MetricEmitter
 
 _ENTITY = "memory_store"
+_METRICS_EMITTER = MetricEmitter("memory")
 
 # ── Configuration helpers (read live from central cfg) ────────────────────────
 def _max_token() -> int:
@@ -223,6 +225,17 @@ class MemoryStore:
 
             self._maybe_compact()
             self._persist_working_memory_unlocked()
+            curr_tokens = self._working_tokens()
+
+        _METRICS_EMITTER.log({
+            "event_type": "working_turn",
+            "working_tokens_count": curr_tokens,
+            "compaction_triggered": False,
+            "tokens_freed": 0,
+            "turns_evaluated": 1,
+            "turns_promoted": 0,
+            "facts_consolidated": 0,
+        })
 
         log_it(f"add_turn ({self.namespace}): role={role!r} tokens≈{_token_count(content)}", _ENTITY)
 
@@ -486,6 +499,17 @@ class MemoryStore:
         # is called outside the lock path but we're already under it here, so
         # call the internal method directly)
         self._write_short_term_unlocked(summary_entry)
+
+        tokens_freed = sum(_token_count(t["content"]) for t in to_compact)
+        _METRICS_EMITTER.log({
+            "event_type": "compaction",
+            "working_tokens_count": self._working_tokens(),
+            "compaction_triggered": True,
+            "tokens_freed": tokens_freed,
+            "turns_evaluated": len(to_compact),
+            "turns_promoted": 0,
+            "facts_consolidated": 0,
+        })
 
     def _write_short_term_unlocked(self, entry: dict):
         """Same as write_short_term but assumes the caller holds _lock."""

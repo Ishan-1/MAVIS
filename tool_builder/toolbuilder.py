@@ -1,4 +1,5 @@
 import os
+import time
 import traceback
 from google import genai
 from prompts.prompt_templates import builder_prompt, tester_prompt, debug_prompt
@@ -6,6 +7,9 @@ import json
 from core.config import cfg
 from core.helpers import log_it
 from core.output import mavis_status, mavis_warn
+from core.metrics import MetricEmitter
+
+_EMITTER = MetricEmitter("builders")
 
 
 class ToolBuildError(Exception):
@@ -210,6 +214,7 @@ class ToolBuilder:
         Raises:
             Exception: propagated LLM or JSON parse errors from the build step.
         """
+        t0 = time.perf_counter()
         func_name = func_sig.split("(")[0].strip()
 
         # ── 1. Generate tool code ──────────────────────────────────────
@@ -263,11 +268,24 @@ class ToolBuilder:
             status, result = tester.test_tool(func_name, check_imports=True)
 
             if status == 0:
+                latency_ms = round((time.perf_counter() - t0) * 1000, 2)
                 log_it(
                     f"Tool '{func_name}' passed tests on attempt {attempt}.",
                     self.entity_name,
                 )
                 self._register_tool(func_sig, func_desc, generalizability=generalizability)
+
+                _EMITTER.log({
+                    "target_name": func_name,
+                    "builder_type": "tool",
+                    "latency_ms": latency_ms,
+                    "status": "passed",
+                    "attempt_count": attempt,
+                    "failure_reason": "none",
+                    "debugger_prior_used": ref_context != "",
+                    "input_tokens": len(build_prompt) // 4,
+                    "output_tokens": len(tool_code) // 4,
+                })
 
                 # Specialized Memory: Record successful pattern or debug fix
                 try:
@@ -300,6 +318,18 @@ class ToolBuilder:
             attempt += 1
 
         # ── 4. All retries exhausted ───────────────────────────────────
+        latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+        _EMITTER.log({
+            "target_name": func_name,
+            "builder_type": "tool",
+            "latency_ms": latency_ms,
+            "status": "failed",
+            "attempt_count": attempt,
+            "failure_reason": str(tb)[:100],
+            "debugger_prior_used": ref_context != "",
+            "input_tokens": len(build_prompt) // 4,
+            "output_tokens": 0,
+        })
         self._mark_needs_manual_fix(func_name)
         mavis_warn(
             f"Tool '{func_name}' failed all {self.MAX_RETRIES} debug attempts.\n"

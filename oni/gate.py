@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 
 class ConfirmationGate:
@@ -63,21 +64,40 @@ class ConfirmationGate:
             )
             return False
 
+        t0 = time.perf_counter()
+        approved = False
         try:
             from core.output import oni_gate_panel, interactive_select_yes_no
             oni_gate_panel(description)
-            return interactive_select_yes_no("Allow operation?", default=False)
+            approved = interactive_select_yes_no("Allow operation?", default=False)
         except Exception:
             # Fallback if output layer encounters any terminal issues
             print(f"\n[ONI] ⚠ Approval required:\n      {description}")
             try:
                 response = input("  Allow? (yes/no, default no): ").strip().lower()
-                return response in ("yes", "y")
+                approved = response in ("yes", "y")
             except (EOFError, KeyboardInterrupt):
                 print("\n[ONI] Approval cancelled — defaulting to deny.")
-                return False
+                approved = False
+
+        dwell_time_ms = round((time.perf_counter() - t0) * 1000, 2)
+        try:
+            from core.metrics import MetricEmitter
+            MetricEmitter("oni").log({
+                "target_command_or_path": description[:100],
+                "phase": "runtime",
+                "trust_level": "ask",
+                "oni_decision": "greylist_prompted",
+                "user_decision": "allowed" if approved else "denied",
+                "dwell_time_ms": dwell_time_ms,
+            })
+        except Exception:
+            pass
+
+        return approved
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _is_main_thread(self) -> bool:
         return threading.current_thread().ident == self._main_thread_id
+

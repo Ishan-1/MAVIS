@@ -59,8 +59,28 @@ if os.path.exists("data/agents_list.json"):
     except Exception:
         agents_list = {}
 
+import uuid
+from core.metrics import MetricEmitter, get_metrics_summary, format_metrics_tables
+
 _MAV_ROOT = os.path.dirname(os.path.abspath(__file__))
 _session_chat: list[dict[str, str]] = []
+_session_start_ts = time.time()
+_interpreter_emitter = MetricEmitter("interpreter")
+_dag_emitter = MetricEmitter("dag_execution")
+
+
+def compute_dag_depth(pipeline: list[dict]) -> int:
+    """Compute the longest critical dependency path in the DAG."""
+    from core.dag import extract_node_dependencies
+    depths: dict[str, int] = {}
+    for node in pipeline:
+        nid = node.get("id", "")
+        deps = extract_node_dependencies(node)
+        if not deps:
+            depths[nid] = 1
+        else:
+            depths[nid] = 1 + max((depths.get(d, 0) for d in deps), default=0)
+    return max(depths.values(), default=1) if depths else 0
 
 # ── Readline tab-completion for slash commands ──────────────────────────────────
 _SLASH_SUBCOMMANDS = {
@@ -73,12 +93,16 @@ _SLASH_SUBCOMMANDS = {
     "/greylist": [],
     "/unlist": [],
     "/status": [],
+    "/metrics": [],
+    "/dashboard": [],
 }
 
 _COMMAND_METAS = {
     "/help": "Show available slash commands",
     "/save": "Export current chat history to a markdown (.md) file",
     "/status": "Heartbeat, workers, scheduler, memory tokens",
+    "/metrics": "Performance, latency, tokens & caching metrics",
+    "/dashboard": "Launch local Streamlit web dashboard",
     "/config": "Inspect or edit configuration",
     "/trust": "Switch ONI trust level (ask | yolo | whitelist)",
     "/allow": "Add command to ONI whitelist",
@@ -178,8 +202,19 @@ def _get_prompt_message():
 
 
 def _get_bottom_toolbar():
+    now = time.time()
+    elapsed_m = int((now - _session_start_ts) / 60)
+    wm = memory_store.get_working_memory()
+    wm_tokens = sum(len(t.get("content", "")) // 4 for t in wm)
+    wm_cap = cfg.memory.get("max_token", 12000)
+
+    summary = get_metrics_summary(_session_start_ts)
+    t_in = summary["tokens_total"]["input"]
+    t_out = summary["tokens_total"]["output"]
+    cache_hits = summary["caching"]["hits"]
+
     return [
-        ("", " [MAVIS v1.0]  Type / for commands • ↑/↓ for history • 'exit' to quit "),
+        ("", f" [MAVIS v1.0]  Session: {elapsed_m}m • Tokens: {t_in:,} in / {t_out:,} out • Cache Hits: {cache_hits} • WM: {wm_tokens}/{wm_cap} tokens • Type / for commands "),
     ]
 
 
@@ -189,6 +224,8 @@ _HELP_ROWS = [
     ("/help",                    "This help message."),
     ("/save [file.md]",          "Export current chat history to a Markdown file."),
     ("/status",                  "Heartbeat, worker PIDs, scheduler tasks, memory usage."),
+    ("/metrics",                 "Display performance, latency, token, and cache analytics."),
+    ("/dashboard",               "Launch local Streamlit web dashboard in browser."),
     ("/config",                  "Print current config."),
     ("/config save",             "Persist config to disk."),
     ("/config reload",           "Reload config from disk."),
@@ -295,6 +332,53 @@ def handle_slash_command(raw: str) -> bool:
     # ── /status ───────────────────────────────────────────────────────────────
     if verb == "/status":
         _print_status()
+        return True
+
+    # ── /metrics ──────────────────────────────────────────────────────────────
+    if verb == "/metrics":
+        tables = format_metrics_tables(_session_start_ts if (len(parts) > 1 and parts[1] == "session") else None)
+        for t in tables:
+            mavis_print(t)
+        return True
+
+    # ── /dashboard ────────────────────────────────────────────────────────────
+    if verb == "/dashboard":
+        mavis_status("Launching MAVIS Local Dashboard on http://localhost:8501 ...")
+        try:
+            import shutil
+            import webbrowser
+            dashboard_path = os.path.join(_MAV_ROOT, "scripts", "dashboard.py")
+            
+            # Find streamlit binary: check local venv first, then PATH, then sys.executable
+            venv_streamlit = os.path.join(_MAV_ROOT, "bin", "streamlit")
+            venv_python = os.path.join(_MAV_ROOT, "bin", "python")
+            
+            if os.path.exists(venv_streamlit):
+                cmd = [venv_streamlit, "run", dashboard_path, "--server.headless", "true", "--server.port", "8501"]
+            elif os.path.exists(venv_python):
+                cmd = [venv_python, "-m", "streamlit", "run", dashboard_path, "--server.headless", "true", "--server.port", "8501"]
+            elif shutil.which("streamlit"):
+                cmd = [shutil.which("streamlit"), "run", dashboard_path, "--server.headless", "true", "--server.port", "8501"]
+            else:
+                cmd = [sys.executable, "-m", "streamlit", "run", dashboard_path, "--server.headless", "true", "--server.port", "8501"]
+
+            proc = subprocess.Popen(
+                cmd,
+                cwd=_MAV_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(1.0)
+            if proc.poll() is not None:
+                mavis_error(f"Dashboard process exited immediately with code {proc.returncode}. Try running: ./bin/streamlit run scripts/dashboard.py")
+            else:
+                mavis_ok(f"Dashboard running at [bold cyan]http://localhost:8501[/bold cyan] (PID {proc.pid})")
+                try:
+                    webbrowser.open("http://localhost:8501")
+                except Exception:
+                    pass
+        except Exception as e:
+            mavis_error(f"Could not launch dashboard: {e}")
         return True
 
     # ── /config ... ───────────────────────────────────────────────────────────
@@ -680,7 +764,7 @@ def call_command(command_name, params_dict):
 
 # ── Pipeline execution ────────────────────────────────────────────────────────
 
-def execute_pipeline(pipeline, query: str = "", context: str = ""):
+def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str = ""):
     """
     Execute a list of pipeline nodes in topological sorted order, resolving dependencies.
 
@@ -689,18 +773,47 @@ def execute_pipeline(pipeline, query: str = "", context: str = ""):
     ONI pre-flight scans the topologically sorted pipeline before any node runs.
     """
     sorted_pipeline, dag_err = validate_and_sort_dag(pipeline)
+    dag_size = len(pipeline) if isinstance(pipeline, list) else 0
+    dag_depth = compute_dag_depth(sorted_pipeline) if sorted_pipeline else 1
+    tool_nodes_count = sum(1 for n in (sorted_pipeline or []) if n.get("type", "tool") == "tool")
+    subagent_nodes_count = sum(1 for n in (sorted_pipeline or []) if n.get("type") == "subagent")
+    _pipeline_start = time.perf_counter()
+
     if dag_err:
         mavis_error(f"Pipeline validation failed: {dag_err}")
+        _dag_emitter.log({
+            "turn_id": turn_id,
+            "start_time": datetime.now().isoformat(),
+            "end_time": datetime.now().isoformat(),
+            "latency_ms": 0.0,
+            "status": "aborted",
+            "dag_size": dag_size,
+            "dag_depth": dag_depth,
+            "tool_nodes_count": tool_nodes_count,
+            "subagent_nodes_count": subagent_nodes_count,
+            "failed_node_id": "dag_validation",
+        })
         return
 
     ok, issues = _oni.preflight_scan(sorted_pipeline)
     if not ok:
         oni_print(f"Pipeline aborted: {'; '.join(issues)}")
+        _dag_emitter.log({
+            "turn_id": turn_id,
+            "start_time": datetime.now().isoformat(),
+            "end_time": datetime.now().isoformat(),
+            "latency_ms": 0.0,
+            "status": "aborted",
+            "dag_size": dag_size,
+            "dag_depth": dag_depth,
+            "tool_nodes_count": tool_nodes_count,
+            "subagent_nodes_count": subagent_nodes_count,
+            "failed_node_id": "oni_preflight",
+        })
         return
 
     node_results = {}
     mavis_status("Starting pipeline execution...")
-    _pipeline_start = time.time()
 
     for node in sorted_pipeline:
         node_id = node["id"]
@@ -716,20 +829,59 @@ def execute_pipeline(pipeline, query: str = "", context: str = ""):
                 mavis_error(
                     f"Pipeline aborted: step '{node_id}' resolution error: {res_err}"
                 )
+                latency_ms = round((time.perf_counter() - _pipeline_start) * 1000, 2)
+                _dag_emitter.log({
+                    "turn_id": turn_id,
+                    "start_time": datetime.now().isoformat(),
+                    "end_time": datetime.now().isoformat(),
+                    "latency_ms": latency_ms,
+                    "status": "node_failed",
+                    "dag_size": dag_size,
+                    "dag_depth": dag_depth,
+                    "tool_nodes_count": tool_nodes_count,
+                    "subagent_nodes_count": subagent_nodes_count,
+                    "failed_node_id": node_id,
+                })
                 return
 
             if node_type == "subagent":
                 agent = load_agent(command_name, llm)
                 if not agent:
                     mavis_error(f"Pipeline aborted: subagent '{command_name}' not found.")
+                    latency_ms = round((time.perf_counter() - _pipeline_start) * 1000, 2)
+                    _dag_emitter.log({
+                        "turn_id": turn_id,
+                        "start_time": datetime.now().isoformat(),
+                        "end_time": datetime.now().isoformat(),
+                        "latency_ms": latency_ms,
+                        "status": "node_failed",
+                        "dag_size": dag_size,
+                        "dag_depth": dag_depth,
+                        "tool_nodes_count": tool_nodes_count,
+                        "subagent_nodes_count": subagent_nodes_count,
+                        "failed_node_id": node_id,
+                    })
                     return
-                status, result = agent.run(**resolved_params)
+                status, result = agent.run(turn_id=turn_id, **resolved_params)
             else:
                 status, result = call_command(command_name, resolved_params)
 
             # Contract verification: 1st element MUST be int status code, 2nd is output
             if not isinstance(status, int):
                 mavis_error(f"Step '{node_id}' ({command_name}) returned invalid status type: {type(status).__name__}. Aborting pipeline.")
+                latency_ms = round((time.perf_counter() - _pipeline_start) * 1000, 2)
+                _dag_emitter.log({
+                    "turn_id": turn_id,
+                    "start_time": datetime.now().isoformat(),
+                    "end_time": datetime.now().isoformat(),
+                    "latency_ms": latency_ms,
+                    "status": "node_failed",
+                    "dag_size": dag_size,
+                    "dag_depth": dag_depth,
+                    "tool_nodes_count": tool_nodes_count,
+                    "subagent_nodes_count": subagent_nodes_count,
+                    "failed_node_id": node_id,
+                })
                 return
 
             if status == 0:
@@ -738,19 +890,61 @@ def execute_pipeline(pipeline, query: str = "", context: str = ""):
             else:
                 # Proper error handling: non-zero status aborts pipeline with error payload
                 mavis_error(f"Step '{node_id}' ({command_name}) failed with status {status}: {result}. Aborting pipeline.")
+                latency_ms = round((time.perf_counter() - _pipeline_start) * 1000, 2)
+                _dag_emitter.log({
+                    "turn_id": turn_id,
+                    "start_time": datetime.now().isoformat(),
+                    "end_time": datetime.now().isoformat(),
+                    "latency_ms": latency_ms,
+                    "status": "node_failed",
+                    "dag_size": dag_size,
+                    "dag_depth": dag_depth,
+                    "tool_nodes_count": tool_nodes_count,
+                    "subagent_nodes_count": subagent_nodes_count,
+                    "failed_node_id": node_id,
+                })
                 return
 
         except Exception as e:
             mavis_error(f"Critical error at step '{node_id}': {e}")
+            latency_ms = round((time.perf_counter() - _pipeline_start) * 1000, 2)
+            _dag_emitter.log({
+                "turn_id": turn_id,
+                "start_time": datetime.now().isoformat(),
+                "end_time": datetime.now().isoformat(),
+                "latency_ms": latency_ms,
+                "status": "node_failed",
+                "dag_size": dag_size,
+                "dag_depth": dag_depth,
+                "tool_nodes_count": tool_nodes_count,
+                "subagent_nodes_count": subagent_nodes_count,
+                "failed_node_id": node_id,
+            })
             return
 
-    elapsed = time.time() - _pipeline_start
+    elapsed_s = time.perf_counter() - _pipeline_start
+    latency_ms = round(elapsed_s * 1000, 2)
     mavis_status("Pipeline finished.")
+
+    _dag_emitter.log({
+        "turn_id": turn_id,
+        "start_time": datetime.now().isoformat(),
+        "end_time": datetime.now().isoformat(),
+        "latency_ms": latency_ms,
+        "status": "success",
+        "dag_size": dag_size,
+        "dag_depth": dag_depth,
+        "tool_nodes_count": tool_nodes_count,
+        "subagent_nodes_count": subagent_nodes_count,
+        "failed_node_id": "",
+    })
+
     if node_results and pipeline:
         final_answer = answerer.synthesize(
             query=query,
             pipeline_results=node_results,
             memory_context=context,
+            turn_id=turn_id,
         )
         mavis_answer(final_answer)
         _session_chat.append({
@@ -761,8 +955,8 @@ def execute_pipeline(pipeline, query: str = "", context: str = ""):
 
     # Fire notification if the pipeline took longer than the configured threshold
     threshold = cfg.output.get("notify_pipeline_threshold_s", 5)
-    if elapsed >= threshold:
-        _notify("MAVIS: Pipeline complete", f"Finished in {elapsed:.1f}s")
+    if elapsed_s >= threshold:
+        _notify("MAVIS: Pipeline complete", f"Finished in {elapsed_s:.1f}s")
 
     return node_results
 
@@ -780,6 +974,7 @@ def interpret_command(command: str) -> bool:
     if handle_slash_command(command):
         return True
 
+    turn_id = uuid.uuid4().hex[:8]
     _session_chat.append({
         "role": "user",
         "content": command,
@@ -794,7 +989,7 @@ def interpret_command(command: str) -> bool:
         context = ""
 
     # 0.5 Check Pipeline Cache
-    cache_hit = cache_manager.check_cache(command)
+    cache_hit = cache_manager.check_cache(command, turn_id=turn_id)
     if cache_hit:
         if cache_hit["ttl_valid"] and cache_hit["result"] is not None:
             mavis_status("Cache hit (Result valid). Serving from cache.")
@@ -802,6 +997,7 @@ def interpret_command(command: str) -> bool:
                 query=command,
                 pipeline_results=cache_hit["result"],
                 memory_context=context,
+                turn_id=turn_id,
             )
             mavis_answer(final_answer)
             _session_chat.append({
@@ -812,7 +1008,7 @@ def interpret_command(command: str) -> bool:
             return True
         else:
             mavis_status("Cache hit (Pipeline valid, result expired). Re-running pipeline.")
-            res = execute_pipeline(cache_hit["pipeline"], query=command, context=context)
+            res = execute_pipeline(cache_hit["pipeline"], query=command, context=context, turn_id=turn_id)
             if res:
                 cache_manager.save_cache(
                     command, 
@@ -840,6 +1036,7 @@ def interpret_command(command: str) -> bool:
         user_input=command,
     )
 
+    t0_plan = time.perf_counter()
     try:
         with spinner("Interpreting..."):
             response = llm.generate(
@@ -850,12 +1047,34 @@ def interpret_command(command: str) -> bool:
         mavis_debug(response, entity="interpreter")
         response_dict = json.loads(response)
     except json.JSONDecodeError:
+        latency_ms = round((time.perf_counter() - t0_plan) * 1000, 2)
+        _interpreter_emitter.log({
+            "turn_id": turn_id,
+            "latency_ms": latency_ms,
+            "status": "error",
+            "input_tokens": len(user_prompt) // 4 + len(interpreter_system_prompt) // 4,
+            "output_tokens": 0,
+            "tools_retrieved_count": len(active_tools),
+        })
         mavis_error("I had trouble understanding that — try rephrasing.")
         mavis_debug(f"Raw LLM response: {response}", entity="interpreter")
         return True
     except Exception as e:
+        latency_ms = round((time.perf_counter() - t0_plan) * 1000, 2)
+        _interpreter_emitter.log({
+            "turn_id": turn_id,
+            "latency_ms": latency_ms,
+            "status": "error",
+            "input_tokens": len(user_prompt) // 4 + len(interpreter_system_prompt) // 4,
+            "output_tokens": 0,
+            "tools_retrieved_count": len(active_tools),
+        })
         mavis_error(f"LLM call failed: {e}")
         return True
+
+    plan_latency_ms = round((time.perf_counter() - t0_plan) * 1000, 2)
+    input_tokens = len(user_prompt) // 4 + len(interpreter_system_prompt) // 4
+    output_tokens = len(response) // 4
 
     emotion, emotion_strength, directive = parse_classifier_fields(response_dict)
 
@@ -870,6 +1089,14 @@ def interpret_command(command: str) -> bool:
     # 0. Check for direct context response (memory recall, stored facts, preferences)
     direct = response_dict.get("direct_response")
     if direct and direct.strip():
+        _interpreter_emitter.log({
+            "turn_id": turn_id,
+            "latency_ms": plan_latency_ms,
+            "status": "direct_response",
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "tools_retrieved_count": len(active_tools),
+        })
         mavis_answer(direct)
         _session_chat.append({
             "role": "assistant",
@@ -884,6 +1111,15 @@ def interpret_command(command: str) -> bool:
             directive=directive,
         )
         return True
+
+    _interpreter_emitter.log({
+        "turn_id": turn_id,
+        "latency_ms": plan_latency_ms,
+        "status": "pipeline",
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "tools_retrieved_count": len(active_tools),
+    })
 
     # 2a. Build missing commands (tools)
     missing = response_dict.get("missing_commands", [])
@@ -994,7 +1230,7 @@ def interpret_command(command: str) -> bool:
         mavis_status("No executable pipeline in the response.")
         return True
 
-    res = execute_pipeline(pipeline, query=command, context=context)
+    res = execute_pipeline(pipeline, query=command, context=context, turn_id=turn_id)
     if res:
         ttl = response_dict.get("ttl", 300)
         gen = response_dict.get("generalizability", "specialized")
@@ -1066,6 +1302,27 @@ def _write_heartbeat() -> None:
         pass
 
 
+def _print_exit_summary() -> None:
+    now = time.time()
+    elapsed_m = round((now - _session_start_ts) / 60, 1)
+    summary = get_metrics_summary(_session_start_ts)
+    t_in = summary["tokens_total"]["input"]
+    t_out = summary["tokens_total"]["output"]
+    queries = summary["interpreter"]["total_queries"]
+    cache_hits = summary["caching"]["hits"]
+    tokens_saved = summary["caching"]["tokens_saved"]
+
+    if queries > 0 or t_in > 0:
+        rule("Session Performance Summary")
+        print_table([
+            ("Session Duration", f"{elapsed_m} min"),
+            ("Queries Processed", str(queries)),
+            ("Tokens Consumed", f"{t_in + t_out:,} ({t_in:,} in / {t_out:,} out)"),
+            ("Cache Hits", f"{cache_hits} hits ({tokens_saved:,} tokens saved)"),
+        ])
+        rule()
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -1132,6 +1389,10 @@ if __name__ == "__main__":
             pass
         try:
             runner.stop()
+        except BaseException:
+            pass
+        try:
+            _print_exit_summary()
         except BaseException:
             pass
         mavis_print("[dim]Goodbye.[/dim]", level="quiet")

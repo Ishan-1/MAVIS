@@ -177,12 +177,25 @@ To exit cleanly at any time, type `exit`, `quit`, or press `Ctrl+C`.
 
 ---
 
+### 5. Telemetry & Observability (`core/metrics.py`, `scripts/dashboard.py`)
+MAVIS features a lightweight, high-performance telemetry engine built specifically for local AI assistants:
+- **Append-Only CSV Streams**: High-throughput metric emissions into isolated CSV files in `data/metrics/` (`interpreter`, `answerer`, `dag_execution`, `caching`, `builders`, `subagents`, `oni`, `memory`).
+- **Targeted Aggregations**: Tracks **Average, Median, and Max** metrics across components (bypassing unnecessary percentiles like P50/P95/P99).
+- **Fast Zero-Join Reads**: Tabular views and dashboard panels read only their specific component CSV file without cross-table joins.
+- **Lazy Single-Turn Trace Inspector**: Reconstructs complete multi-step query execution lifecycles on-demand by correlating `turn_id` across CSV files.
+- **Local Web Dashboard**: Streamlit-powered visual analytics interface running at `http://localhost:8501`.
+
+---
+
 ## Configuration & Runtime Commands
 
 All application configuration is managed centrally in **[`data/mavis_config.json`](file:///home/ishan07/PerTools/MAV/data/mavis_config.json)**. Settings can be updated dynamically at runtime via slash commands:
 
 ```bash
 /help                           # View command assistance
+/metrics [session]              # Display rich CLI performance, latency & token tables
+/dashboard                      # Launch or open the local Streamlit web dashboard
+/status                         # View heartbeats, worker PIDs, scheduler tasks, and memory pressure
 /config                         # Print active configuration table
 /config set llm.provider ollama # Switch active LLM provider (gemini | openai | ollama)
 /config set llm.model llama3.2  # Change target model name
@@ -192,7 +205,9 @@ All application configuration is managed centrally in **[`data/mavis_config.json
 /trust ask|yolo|whitelist       # Change ONI security trust level
 /allow <tool_name>              # Whitelist tool
 /block <tool_name>              # Blacklist tool
-/audit [N]                      # Display last N lines of security audit log
+/greylist <tool_name>           # Greylist tool (prompts for confirmation)
+/unlist <tool_name>             # Remove tool from all ONI lists
+/save [filename.md]             # Export current session chat to Markdown
 ```
 
 ### Example `mavis_config.json`
@@ -251,6 +266,7 @@ MAV/
 │   ├── config.py             # Central config manager (MAVISConfig)
 │   ├── caching.py            # Semantic CacheManager using ChromaDB
 │   ├── answerer.py           # Presentation layer synthesizing final responses
+│   ├── metrics.py            # Lightweight CSV telemetry emitter & aggregator
 │   ├── helpers.py            # Structured logging (log_it)
 │   ├── output.py             # Rich console formatting & UI theme
 │   ├── scheduler.py          # Background task scheduler
@@ -290,14 +306,25 @@ MAV/
 │   ├── mavis_config.json     # Master configuration file
 │   ├── commands_list.json    # Tool registry with generalizability classes
 │   ├── agents_list.json      # Sub-agent registry mirroring commands list
-│   └── user_profile.json     # User preferences & profile information
+│   ├── user_profile.json     # User preferences & profile information
+│   └── metrics/              # Component CSV telemetry streams (gitignored)
+│       ├── interpreter.csv
+│       ├── caching.csv
+│       ├── dag_execution.csv
+│       ├── answerer.csv
+│       ├── subagents.csv
+│       ├── builders.csv
+│       ├── oni.csv
+│       └── memory.csv
 ├── docs/                     # Specifications and architectural documentation
 │   ├── bugs.md               # Tracked issues & resolution history
+│   ├── Observability.md      # Performance & telemetry specification
 │   ├── Subagents.md          # Cognitive sub-agent architecture spec
 │   ├── Harness.md            # ONI security harness architecture
 │   ├── Memory.md             # Multi-namespace memory design & schemas
 │   └── UX.md                 # UI/UX interaction standards
 ├── scripts/
+│   ├── dashboard.py          # Streamlit observability web dashboard
 │   └── reset_chroma.sh       # Maintenance tool to rebuild ChromaDB schemas
 ├── oni/                      # ONI security harness
 │   ├── __init__.py           # ONI singleton exports
@@ -311,7 +338,7 @@ MAV/
 │   ├── long_term_worker.py   # Short-term → long-term archiver & pruner
 │   └── worker_process.py     # Isolated worker daemon subprocess
 ├── tools/                    # Dynamic and manual Python tool files (gitignored)
-├── tests/                    # Unit tests and generated tool tests (gitignored)
+├── tests/                    # Unit tests and test suite (test_metrics, test_dag, ...)
 ├── prompts/                  # LLM prompt templates
 │   ├── prompt_templates.py   # Interpreter, tool builder & tester prompts
 │   └── agent_prompt_templates.py # Agent builder, tester & debugger prompts
