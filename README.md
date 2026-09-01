@@ -124,6 +124,13 @@ MAVIS employs a multi-tiered semantic caching system using ChromaDB to save time
 - **Generalization**: Cached generalized pipelines can extract new parameters on-the-fly without rebuilding the entire DAG.
 - **Eviction Policies**: Employs TTL eviction to clear stale results (while keeping the reusable pipeline) and an LRU background task for overall capacity management.
 
+### 7. Telemetry & Observability (`core/metrics.py`, `scripts/dashboard.py`)
+MAVIS features a lightweight, high-performance telemetry engine built specifically for local AI assistants:
+- **Append-Only CSV Streams**: High-throughput metric emissions into isolated CSV files in `data/metrics/` (`interpreter`, `answerer`, `dag_execution`, `caching`, `builders`, `subagents`, `oni`, `memory`).
+- **Targeted Aggregations**: Tracks **Average, Median, and Max** metrics across components (bypassing unnecessary percentiles like P50/P95/P99).
+- **Fast Zero-Join Reads**: Tabular views and dashboard panels read only their specific component CSV file without cross-table joins.
+- **Lazy Single-Turn Trace Inspector**: Reconstructs complete multi-step query execution lifecycles on-demand by correlating `turn_id` across CSV files.
+- **Local Web Dashboard**: Streamlit-powered visual analytics interface running at `http://localhost:8501`.
 
 ---
 
@@ -175,17 +182,6 @@ python main.py
 
 To exit cleanly at any time, type `exit`, `quit`, or press `Ctrl+C`.
 
----
-
-### 5. Telemetry & Observability (`core/metrics.py`, `scripts/dashboard.py`)
-MAVIS features a lightweight, high-performance telemetry engine built specifically for local AI assistants:
-- **Append-Only CSV Streams**: High-throughput metric emissions into isolated CSV files in `data/metrics/` (`interpreter`, `answerer`, `dag_execution`, `caching`, `builders`, `subagents`, `oni`, `memory`).
-- **Targeted Aggregations**: Tracks **Average, Median, and Max** metrics across components (bypassing unnecessary percentiles like P50/P95/P99).
-- **Fast Zero-Join Reads**: Tabular views and dashboard panels read only their specific component CSV file without cross-table joins.
-- **Lazy Single-Turn Trace Inspector**: Reconstructs complete multi-step query execution lifecycles on-demand by correlating `turn_id` across CSV files.
-- **Local Web Dashboard**: Streamlit-powered visual analytics interface running at `http://localhost:8501`.
-
----
 
 ## Configuration & Runtime Commands
 
