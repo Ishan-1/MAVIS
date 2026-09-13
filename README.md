@@ -1,136 +1,114 @@
 # MAVIS — My Awesome Virtual Intelligence Suite
 
-MAVIS is an extensible, local-first personal AI assistant built for resilient automation. It decomposes natural language instructions into validated DAG execution pipelines, synthesizes and tests missing tools on-the-fly, maintains specialized long-term memory across isolated domain topics, and enforces strict security through the **ONI** harness.
+MAVIS is a self-modifying, local-first personal AI assistant that dynamically adapts to user requirements. It decomposes natural language instructions into validated Directed Acyclic Graph (DAG) pipelines, synthesizes and self-debugs missing tools and sub-agents on-the-fly, enforces OS-level security through the **ONI** harness, and maintains long-term memory via a **Topic-Subscribed Neo4j Knowledge Graph**.
 
-MAVIS is **LLM provider-agnostic**, supporting cloud backbones (Gemini, OpenAI, Claude) and 100% offline local models (via Ollama or OpenAI-compatible local endpoints like vLLM).
+MAVIS is **LLM provider-agnostic**, supporting cloud models (Google Gemini, OpenAI, Claude) and 100% offline local inference (via Ollama or OpenAI-compatible endpoints like vLLM).
 
 ---
 
-## Architecture
+## System Architecture
 
 ```
 User Input (text)
       │
       ▼
-handle_slash_command()       ← intercepts /config, /trust, /allow, /block, etc.
+handle_slash_command()       ← /config, /status, /trust, /metrics, /mcp, /save
       │  (if standard prompt)
       ▼
-cache_manager.check_cache()  ──► [Cache Hit >0.95] ─────────► Answerer.synthesize() (instant reply)
+cache_manager.check_cache()  ──► [Cache Hit >0.95] ─────────► Answerer.synthesize() (sub-ms instant reply)
       │                      └─► [Pipeline Hit 0.85-0.95] ─► Fast LLM verify ──► execute_pipeline()
       ▼  (if miss)
-interpret_command()          ← LLM Client (Gemini / OpenAI / Ollama): decomposes into heterogeneous DAG
+interpret_command()          ← Plans Heterogeneous DAG with Tool & Subagent nodes
+      │                          └─ Discovers & syncs external tools via Model Context Protocol (MCP)
+      ├─ missing tools?  ──► ToolBuilder.build_tool()
+      │                          ├─ Queries past tooling patterns & debugger fixes
+      │                          ├─ Generates Python module & scans AST (blocks dangerous imports)
+      │                          ├─ Runs automated pytest validation in isolated process
+      │                          └─ FAIL? → debug_tool() retry loop → writes fix to Neo4j
+      │                             PASS? → registers in commands_list.json & Neo4j
       │
-      ├─ missing tools? ──► ToolBuilder.build_tool()
-      │                          ├─ Cross-read memories: loads conventions & debugger fixes
-      │                          ├─ LLM generates Python tool module
-      │                          ├─ AST scan (ONI: blocks subprocess, socket, os.system, …)
-      │                          ├─ ToolTester runs auto-generated pytest validation (with sys.modules eviction)
-      │                          ├─ FAIL? → debug_tool() retry loop (max_retries from config)
-      │                          │           └─ Fixed? → writes fix to memories/debugger/
-      │                          └─ PASS (attempt 0) → writes pattern to memories/toolbuilder/
-      │                                                & registers in commands_list.json
-      │
-      ├─ missing agents? ─► AgentBuilder.build_agent()
-      │                          ├─ Cross-read memories: loads agent_debugger failure priors
-      │                          ├─ Synthesizes BaseAgent configuration with input/output schemas
-      │                          ├─ AgentTester runs LLM-as-a-Judge discrete evaluation (passed/failed)
-      │                          ├─ FAIL? → AgentDebugger refines prompt & negative constraints
-      │                          │           └─ Fixed? → writes fix to memories/agent_debugger/
-      │                          └─ PASS → registers in data/agents_list.json
+      ├─ missing agents? ──► AgentBuilder.build_agent()
+      │                          ├─ Queries past prompt failure priors
+      │                          ├─ Synthesizes BaseAgent with structured I/O schemas
+      │                          ├─ Runs AgentTester (LLM-as-a-Judge discrete evaluation)
+      │                          └─ FAIL? → AgentDebugger refines prompts & constraints
+      │                             PASS? → registers in agents_list.json & Neo4j
       ▼
 execute_pipeline()
-      ├─ ONI pre-flight scan   ← blacklist → abort; greylist → batch interactive confirmation
-      │
-      ├─ Dispatch nodes        ← runs "tool" (sandboxed subprocess) & "subagent" (in-memory LLM)
-      │                          Strict execution contract: (status_code: int, output: Any)
-      │
-      ├─ cache_manager.save()  ← Stores executed pipeline and generalized params to ChromaDB
-      │
-      └─ Answerer.synthesize() ← Terminal presentation layer quarantines tool data and synthesizes final answer
-
-Background Daemons & Schedulers
-─────────────────────────────────────────────────────────────────────────────
-worker_process (whitelist_only trust)
-  ├─ short_term_worker   — every 15 min: promote high-signal dialogue turns to ChromaDB
-  └─ long_term_worker    — every 8 h:   consolidate facts & behaviours into long-term JSON
-
-Main Process Schedulers
-  ├─ heartbeat           — every 1 min: health check pulse for workers
-  └─ cache_eviction      — every 5 min (TTL) / 60 min (LRU): pipeline cache cleanup
+      ├─ ONI pre-flight scan   ← Security gate: blacklist aborts, greylist requests confirmation
+      ├─ Dispatch nodes        ← Executes "tools" (sandboxed subprocess), "MCP tools" (stdio JSON-RPC), & "subagents" (in-memory LLM)
+      ├─ cache_manager.save()  ← Caches executed pipeline & results to SQLite
+      └─ Answerer.synthesize() ← Terminal presentation layer: quarantines raw tool data & synthesizes reply
 ```
 
 ---
 
-## Core Capabilities
+## Main Components & Unique Design Points
 
-### 1. Provider-Agnostic LLM Layer (`core/llm/`)
-MAVIS abstracts all model generation and vector embeddings behind a uniform `BaseLLMClient` contract. You can switch models live without changing any application code:
-- **Google Gemini**: Vertex AI & Gemini Studio API keys (`gemini-2.5-flash`, `text-embedding-004`).
-- **OpenAI Compatible**: Native support for OpenAI, Groq, DeepSeek, Together AI, and vLLM via standard HTTP.
-- **Local Ollama**: Native local inference targeting `http://localhost:11434` (`llama3.2`, `nomic-embed-text`).
+### 1. Heterogeneous DAG & Terminal Answerer (`core/dag.py`, `core/answerer.py`)
+- **Tool Nodes vs. Sub-Agent Nodes**: Treats code execution and semantic reasoning as distinct primitives. Deterministic tasks run as isolated Python tools; cognitive/semantic tasks run as stateless in-memory subagents.
+- **Terminal Presentation Plane**: DAG execution is strictly for data acquisition. Raw outputs are quarantined within `<tool_data>` blocks and passed to the Answerer, eliminating prompt injection and infinite re-planning loops.
 
-### 2. Topic-Specialized Memory Namespaces (`memories/`)
-Rather than maintaining a single monolithic memory pool, MAVIS separates memories into isolated disk and vector collections:
+### 2. Tiered Memory & Topic-Subscribed Knowledge Graph (`memories/`)
+- **Three-Tiered Memory Hierarchy**:
+  - **Working Memory** (`memories/<ns>/working_memory.json`): Real-time conversational buffer with turn embeddings. When it crosses the token budget (1,500 tokens), compaction promotes salient turns (emotion, intent, directives, failures) to short-term storage and condenses routine chatter into an LLM session summary.
+  - **Short-Term Memory** (`memories/<ns>/short_term/json/`): Rolling 7-day episodic logs stored as daily JSON files (`YYYY-MM-DD.json`), queried via in-memory cosine similarity.
+  - **Long-Term Memory**: Structured Neo4j Property Graph combined with domain-specific JSON catalogs (`facts.json`, `behaviours.json`, `patterns.json`, `fixes.json`).
+- **Decoupled Promotion & Async Extraction**: Background daemons (`tasks/long_term_worker.py`) scan episodic turn deltas and extract structured entity triples asynchronously (`memories/knowledge_extractor.py`), keeping live conversational turns fast.
+- **Hybrid Dense-Graph Retrieval**: Uses Neo4j 5+ native vector indexing (`entity_embeddings`) to find seed entities, then traverses active 1-hop relationships within subscribed topics in a single Cypher query.
+- **Strict Topic Boundaries**:
+  - `interpreter`: Reads `["user.*", "env.*", "tooling.*", "agents.*"]`, writes `user.profile`.
+  - `toolbuilder` & `agent_debugger`: Read `["env.*", "tooling.*", "debugging.*"]`. **Hard-blocked from `user.*`**, protecting user privacy and eliminating context pollution in code generation.
+- **Deterministic Temporal Deduplication**: Functional 1-to-1 predicates (`PREFERS_EDITOR`, `HAS_OS`, `USES_SHELL`) automatically supersede prior active edges (`is_active = false, superseded_at = datetime()`), eliminating conflicting historical facts.
+- **Zero-LLM Subagent Writes**: ToolBuilder and Debugger register tool capabilities, AST rules, and prompt remedies directly into Neo4j without extra LLM overhead.
 
-| Namespace | Focus Area | Promotion Strategy | Storage Path |
-| :--- | :--- | :--- | :--- |
-| **`interpreter`** | User dialogue turns, emotion, intent | Progressive (15-min & 8-hr workers) | `memories/interpreter/` |
-| **`toolbuilder`** | Proven code conventions, successful builds | Event-Driven (Immediate on clean build) | `memories/toolbuilder/` |
-| **`debugger`** | Tool failure fixes, syntax/import pitfalls | Event-Driven (Immediate on debug fix) | `memories/debugger/` |
-| **`agent_debugger`** | Sub-agent prompt remedies & negative constraints | Event-Driven (Immediate on agent fix) | `memories/agent_debugger/` |
-| **`tasks`** | Scheduled job runs, background health | Event-Driven (Immediate on job run) | `memories/tasks/` |
+### 3. Model Context Protocol (MCP) Integration (`core/mcp_client.py`)
+- **Stdio JSON-RPC Client**: Connects to external MCP servers defined in `data/mcp_servers.json` (or central config) over standard input/output.
+- **Dynamic Schema Translation**: Discovers tools via `tools/list` and translates JSON Schema definitions into standard MAVIS Python signatures (`format_mcp_tool_signature`), seamlessly syncing with `commands_list` and the SQLite tool retriever.
+- **First-Class Pipeline Execution**: Dispatches external MCP tools directly within DAG pipelines alongside native tools.
+- **Live Lifecycle Management**: Interactive inspection and hot-reloading via `/mcp [status|list|reload]`.
 
-**Cross-Namespace Learning**: ToolBuilder subscribes to `debugger` memories at generation time to pre-emptively avoid past failure modes without polluting the conversational dialogue context.
+### 4. ONI Security Harness (`oni/`)
+- **Process Isolation**: All dynamic tools run in independent sandboxed subprocesses (`core/run_tool.py`).
+- **AST Code Guard**: Rejects scripts attempting forbidden imports (`subprocess`, `socket`, `pty`, `eval`) before execution.
+- **Tiered Trust Levels**:
+  - `ask`: Interactive user confirmation for write/network actions.
+  - `yolo`: Automated execution for trusted sessions.
+  - `whitelist_only`: Strict deny-by-default execution.
+- **Audit Logging**: Append-only security decisions recorded to `logs/oni_audit.jsonl`.
 
-### 3. ONI — Operating System & Network Interface
-A security boundary that gates all filesystem, system, and network access:
-- **Trust Levels**: `ask` (default prompt on sensitive actions), `yolo` (unrestricted), `whitelist_only` (strict deny-by-default).
-- **Pre-Flight Scans**: Entire DAG pipeline inspected before any node executes.
-- **AST Code Guard**: Dynamically generated tools scanned for forbidden imports (`subprocess`, `socket`, `pty`, `eval`, etc.).
-- **Process Isolation**: All tools run inside independent Python subprocesses managed by `core/run_tool.py`.
-- **Append-Only Audit Log**: Every security decision logged to `logs/oni_audit.jsonl`.
+### 5. Autonomous Tool & Agent Builders (`tool_builder/`, `agent_builder/`)
+- **Self-Modifying Assistant**: Automatically synthesizes missing capabilities when encountering unknown commands.
+- **Closed-Loop Verification**:
+  - **Tools**: Validated with auto-generated `pytest` suites and module eviction before registry insertion.
+  - **Agents**: Evaluated by an LLM-as-a-Judge against a 4-part rubric (Schema, Fidelity, Negative Constraints, Containment).
+- **Automated Self-Debugging**: Failed components enter an automated debug loop (up to 3 retries) and record verified fixes into Neo4j.
 
-### 4. Token Optimization & Tool Categorization (`core/tool_retriever.py`)
-MAVIS is architected to minimize token overhead and maximize prompt caching:
-- **Stable Prefix Ordering**: Static system instructions (`interpreter_system_prompt`) are passed via native `system_instruction` headers. Dynamic user turns follow a deterministic order (`COMMANDS LIST` $\to$ `MEMORY CONTEXT` $\to$ `USER INPUT`), unlocking provider-level prompt caching (Gemini Context Caching, OpenAI Prompt Caching).
-- **Categorical Tool Generalizability**: Tools in `data/commands_list.json` are classified into three distinct categories:
-  - **`generalizable`**: Universal primitives and glue tools (datetime, parsing, file reading, state). **Always passed in full** to eliminate missing-primitive hallucinations during multi-step DAG planning.
-  - **`repurposable`**: Reusable domain utilities (news search, web scrapers, email).
-  - **`specialized`**: Bespoke, single-purpose tools for narrow tasks.
-  - Domain tools (`repurposable` + `specialized`) are dynamically retrieved via ChromaDB cosine similarity down to a configurable top-K (default: 5).
-- **Proactive Memory Compaction**: Working memory injection is capped to the last 8 turns with automatic compaction triggered at `0.5 * max_token` to maintain a lean context window.
-- **Discrete Emotion & Directive Classifiers**: Replaced noisy continuous floats with discrete levels (`"low" | "medium" | "high"`) and a clean boolean `directive: bool` for persistent instructions.
+### 6. SQLite Semantic Caching (`core/caching.py`)
+- **Zero External Vector Overhead**: A fast SQLite store with in-memory cosine similarity.
+- **Tiered Retrieval**:
+  - `> 0.95` similarity: Instant cache hit.
+  - `0.85 - 0.95` similarity: Fast LLM verification checks if the cached pipeline satisfies the query.
+- **Dynamic Parameter Extraction**: Adapts generalized pipelines to new inputs without replanning.
+- **Lifecycle Management**: TTL invalidation for time-sensitive results and LRU eviction for storage caps.
 
-### 5. Cognitive Sub-Agent Architecture (`core/agents/`, `agent_builder/`)
-MAVIS provides full architectural symmetry between deterministic Python tools and cognitive sub-agents:
-- **Heterogeneous DAG Execution**: The Interpreter plans execution graphs containing both deterministic environment tools (`"type": "tool"`) and cognitive LLM sub-agents (`"type": "subagent"`).
-- **`BaseAgent` Abstraction**: All sub-agents enforce:
-  - Input payload guards (>32k characters automatically truncated to safeguard the context window).
-  - `<tool_input>` tag isolation for prompt injection defense.
-  - Strict JSON/primitive output schema validation to prevent downstream hallucination cascades.
-- **Cognitive Triad (Builder, Tester, Debugger)**:
-  - **`AgentBuilder`**: Dynamically writes sub-agents to `agents/` and registers them in `data/agents_list.json`.
-  - **`AgentTester` (LLM-as-a-Judge)**: Runs synthetic test cases (happy path, edge-cases, prompt injections) and evaluates them against a 4-part rubric (Schema, Fidelity, Negative Constraints, Containment), emitting strictly discrete `"passed"` or `"failed"` verdicts.
-  - **`AgentDebugger`**: Refines agent system prompts and enforces negative constraints (e.g. banning pleasantries or verbose prose).
-- **`semantic_transform` Primitive**: A built-in universal sub-agent for ad-hoc unstructured extractions, filtering, and multi-document summarization.
-- **Terminal Answerer (`core/answerer.py`)**: A dedicated presentation module that synthesizes final pipeline answers for the user while quarantining raw tool returns inside `<tool_data>` blocks.
+### 7. Categorical Tool Retrieval (`core/tool_retriever.py`)
+- **Prefix Caching Optimization**: Tools are classified into:
+  - `generalizable`: Essential primitives (file reading, datetime). **Always included** in the prompt to prevent planning hallucinations.
+  - `repurposable` & `specialized`: Domain tools retrieved dynamically via cosine ranking down to top-K.
+- Backed by an embedded SQLite registry.
 
-### 6. Semantic Pipeline Caching (`core/caching.py`)
-MAVIS employs a multi-tiered semantic caching system using ChromaDB to save time and API costs on redundant queries:
-- **Vector-Based Retrieval**: Queries are embedded and checked against the `pipeline_cache_chroma` collection.
-- **Cache Hit Tiers**: 
-  - `> 0.95` similarity: Automatic cache hit; results are served instantly.
-  - `0.85 - 0.95` similarity: Triggers a fast LLM verification to ensure the cached pipeline logically satisfies the new query.
-- **Generalization**: Cached generalized pipelines can extract new parameters on-the-fly without rebuilding the entire DAG.
-- **Eviction Policies**: Employs TTL eviction to clear stale results (while keeping the reusable pipeline) and an LRU background task for overall capacity management.
+### 8. Telemetry & Observability (`core/metrics.py`, `scripts/dashboard.py`)
+- **Append-Only CSV Streams**: High-throughput metric emissions in `data/metrics/`.
+- **Zero-Join Analytics**: Fast aggregations (Average, Median, Max) per component.
+- **Lazy Turn Trace Inspector**: Reconstructs end-to-end execution lifecycles by correlating `turn_id`.
+- **Local Streamlit Dashboard**: Web UI accessible via `/dashboard` at `http://localhost:8501`.
 
-### 7. Telemetry & Observability (`core/metrics.py`, `scripts/dashboard.py`)
-MAVIS features a lightweight, high-performance telemetry engine built specifically for local AI assistants:
-- **Append-Only CSV Streams**: High-throughput metric emissions into isolated CSV files in `data/metrics/` (`interpreter`, `answerer`, `dag_execution`, `caching`, `builders`, `subagents`, `oni`, `memory`).
-- **Targeted Aggregations**: Tracks **Average, Median, and Max** metrics across components (bypassing unnecessary percentiles like P50/P95/P99).
-- **Fast Zero-Join Reads**: Tabular views and dashboard panels read only their specific component CSV file without cross-table joins.
-- **Lazy Single-Turn Trace Inspector**: Reconstructs complete multi-step query execution lifecycles on-demand by correlating `turn_id` across CSV files.
-- **Local Web Dashboard**: Streamlit-powered visual analytics interface running at `http://localhost:8501`.
+### 9. Provider-Agnostic LLM Layer (`core/llm/`)
+- Unified `BaseLLMClient` supporting:
+  - **Google Gemini**: Vertex AI & Gemini Studio (`gemini-2.5-flash`, `text-embedding-004`).
+  - **OpenAI Compatible**: Native support for OpenAI, Groq, DeepSeek, and vLLM.
+  - **Ollama**: Local offline inference (`llama3.2`, `nomic-embed-text`).
 
 ---
 
@@ -138,7 +116,7 @@ MAVIS features a lightweight, high-performance telemetry engine built specifical
 
 ### Prerequisites
 - Linux / macOS with Python 3.11+
-- Git
+- Neo4j 5.0+ (Local Docker or Neo4j Aura cloud instance)
 
 ### Installation
 
@@ -147,7 +125,7 @@ MAVIS features a lightweight, high-performance telemetry engine built specifical
 git clone https://github.com/Ishan-1/MAVIS.git ~/PerTools/MAV
 cd ~/PerTools/MAV
 
-# Set up dedicated virtual environment
+# Create virtual environment
 python3 -m venv .
 source bin/activate
 
@@ -155,200 +133,80 @@ source bin/activate
 pip install -r requirements.txt
 ```
 
-> **Important:** Always activate the local venv (`source bin/activate`) before running MAVIS or running tests to ensure the pinned ChromaDB and SDK libraries are used.
-
 ### Configuration (`.env`)
 
-Create or update `.env` in the project root:
+Create `.env` in the project root:
 
 ```env
-# For Gemini provider (default)
-VERTEX_API_KEY="your-vertex-or-gemini-key"
+# Primary LLM Provider
+VERTEX_API_KEY="your-gemini-or-vertex-key"
+# OPENAI_API_KEY="your-openai-key"
 
-# For OpenAI / Groq / DeepSeek (if using openai provider)
-OPENAI_API_KEY="your-openai-key"
-
-# Optional tool API keys
-OPENWEATHER_API_KEY=""
-NEWS_API_KEY=""
+# Neo4j Knowledge Graph
+NEO4J_URI="bolt://localhost:7687"
+NEO4J_USER="neo4j"
+NEO4J_PASSWORD="your-password"
 ```
 
-### Starting MAVIS
+### Running MAVIS
 
 ```bash
 source bin/activate
 python main.py
 ```
 
-To exit cleanly at any time, type `exit`, `quit`, or press `Ctrl+C`.
+---
 
+## Runtime Slash Commands
 
-## Configuration & Runtime Commands
-
-All application configuration is managed centrally in **[`data/mavis_config.json`](file:///home/ishan07/PerTools/MAV/data/mavis_config.json)**. Settings can be updated dynamically at runtime via slash commands:
+Control MAVIS dynamically inside the interactive shell:
 
 ```bash
-/help                           # View command assistance
-/metrics [session]              # Display rich CLI performance, latency & token tables
-/dashboard                      # Launch or open the local Streamlit web dashboard
-/status                         # View heartbeats, worker PIDs, scheduler tasks, and memory pressure
-/config                         # Print active configuration table
+/help                           # View help and command assistance
+/status                         # View heartbeats, worker processes, and memory state
+/metrics [session]              # Print terminal performance and latency tables
+/dashboard                      # Launch local Streamlit observability dashboard
+/config                         # Display active configuration table
 /config set llm.provider ollama # Switch active LLM provider (gemini | openai | ollama)
-/config set llm.model llama3.2  # Change target model name
-/config set memory.top_k 8      # Change retrieved context depth
-/config save                    # Persist runtime updates to disk
-/config reload                  # Reload settings from disk
+/config set llm.model llama3.2  # Change active model
+/config save                    # Persist runtime settings to data/mavis_config.json
+/mcp status|list|reload         # Inspect, list, or hot-reload external MCP servers & tools
 /trust ask|yolo|whitelist       # Change ONI security trust level
 /allow <tool_name>              # Whitelist tool
 /block <tool_name>              # Blacklist tool
-/greylist <tool_name>           # Greylist tool (prompts for confirmation)
-/unlist <tool_name>             # Remove tool from all ONI lists
-/save [filename.md]             # Export current session chat to Markdown
-```
-
-### Example `mavis_config.json`
-
-```json
-{
-    "llm": {
-        "provider": "gemini",
-        "model": "gemini-2.5-flash",
-        "embedding_model": "text-embedding-004",
-        "temperature": 0.2,
-        "vertexai": true,
-        "base_url": null
-    },
-    "oni": {
-        "trust_level": "ask",
-        "whitelist": ["get_current_datetime", "search_news"],
-        "greylist": ["restart_process", "pip"],
-        "blacklist": [],
-        "tool_execution_timeout_seconds": 30
-    },
-    "memory": {
-        "max_token": 12000,
-        "top_k": 5,
-        "short_term_ttl_days": 7,
-        "session_timeout_minutes": 30,
-        "working_memory_active_turns": 8,
-        "compact_token_threshold": 1500,
-        "max_memory_entry_chars": 600,
-        "tool_retrieval_threshold": 8,
-        "tool_retrieval_top_k": 6,
-        "general_tool_threshold": 0.75,
-        "specific_tools_top_k": 5
-    },
-    "toolbuilder": {
-        "max_retries": 3,
-        "forbidden_imports": ["subprocess", "socket", "fork", "pty"]
-    },
-    "scheduler": {
-        "tick_seconds": 30,
-        "short_term_worker_interval_minutes": 15,
-        "long_term_worker_interval_minutes": 480
-    }
-}
+/save [filename.md]             # Export conversation session to Markdown
+exit | quit                     # Clean shutdown
 ```
 
 ---
 
-## Project Structure
+## Project Directory Layout
 
 ```
 MAV/
-├── main.py                   # Application entry point & interactive shell
-├── core/                     # Foundational runtime package
-│   ├── __init__.py           # Re-exports cfg, log_it, TaskRunner, get_llm_client
-│   ├── config.py             # Central config manager (MAVISConfig)
-│   ├── caching.py            # Semantic CacheManager using ChromaDB
-│   ├── answerer.py           # Presentation layer synthesizing final responses
-│   ├── metrics.py            # Lightweight CSV telemetry emitter & aggregator
-│   ├── helpers.py            # Structured logging (log_it)
-│   ├── output.py             # Rich console formatting & UI theme
-│   ├── scheduler.py          # Background task scheduler
-│   ├── run_tool.py           # Subprocess harness for sandboxed tool execution
-│   ├── tool_retriever.py     # Categorical & semantic tool retrieval engine
-│   ├── agents/               # Dynamic agent loading & BaseAgent abstraction
-│   │   ├── __init__.py       # load_agent dynamic loader
-│   │   └── base.py           # BaseAgent class (payload guard, tag isolation)
-│   └── llm/                  # Provider-agnostic LLM subsystem
-│       ├── __init__.py       # get_llm_client() factory
-│       ├── base.py           # BaseLLMClient interface
-│       ├── gemini.py         # Google Gemini provider adapter
-│       ├── openai_compat.py  # OpenAI / Groq / vLLM provider adapter
-│       └── ollama.py         # Local Ollama provider adapter
-├── tool_builder/             # Autonomous tool synthesis package
-│   ├── __init__.py           # Exports ToolBuilder, ToolTester, ToolBuildError
-│   ├── toolbuilder.py        # Code synthesis, self-reflection & debug loop
-│   └── tester.py             # ONI AST scanner & pytest test executor
-├── agent_builder/            # Cognitive sub-agent synthesis package
-│   ├── __init__.py           # Exports AgentBuilder, AgentTester, AgentDebugger
-│   ├── agent_builder.py      # Sub-agent synthesis & lifecycle orchestrator
-│   ├── tester.py             # LLM-as-a-Judge discrete evaluation harness
-│   └── debugger.py           # Prompt constraint refiner & anti-pleasantry debugger
-├── agents/                   # Built-in and dynamically synthesized sub-agents
-│   ├── __init__.py
-│   └── semantic_transform.py # Built-in semantic transformer primitive
-├── memories/                 # Multi-namespace memory subsystem
-│   ├── memory_store.py       # Namespaced MemoryStore manager (working/ST/LT)
-│   ├── embedding.py          # Vector embedding wrapper & cosine similarity
-│   ├── emotion_classifier.py # Dialogue turn classification & promotion rules
-│   ├── interpreter/          # Conversational memory (working_memory.json, ST/LT Chroma)
-│   ├── toolbuilder/          # Successful tool patterns (patterns.json, Chroma)
-│   ├── debugger/             # Tool failure fixes (fixes.json, Chroma)
-│   ├── agent_debugger/       # Agent prompt remedies & negative constraints
-│   └── tasks/                # Background job histories (events.json, Chroma)
-├── data/
-│   ├── mavis_config.json     # Master configuration file
-│   ├── commands_list.json    # Tool registry with generalizability classes
-│   ├── agents_list.json      # Sub-agent registry mirroring commands list
-│   ├── user_profile.json     # User preferences & profile information
-│   └── metrics/              # Component CSV telemetry streams (gitignored)
-│       ├── interpreter.csv
-│       ├── caching.csv
-│       ├── dag_execution.csv
-│       ├── answerer.csv
-│       ├── subagents.csv
-│       ├── builders.csv
-│       ├── oni.csv
-│       └── memory.csv
-├── docs/                     # Specifications and architectural documentation
-│   ├── bugs.md               # Tracked issues & resolution history
-│   ├── Observability.md      # Performance & telemetry specification
-│   ├── Subagents.md          # Cognitive sub-agent architecture spec
-│   ├── Harness.md            # ONI security harness architecture
-│   ├── Memory.md             # Multi-namespace memory design & schemas
-│   └── UX.md                 # UI/UX interaction standards
-├── scripts/
-│   ├── dashboard.py          # Streamlit observability web dashboard
-│   └── reset_chroma.sh       # Maintenance tool to rebuild ChromaDB schemas
-├── oni/                      # ONI security harness
-│   ├── __init__.py           # ONI singleton exports
-│   ├── oni.py                # Preflight scanner, call_system_command, call_fs
-│   ├── config.py             # Central config adapter for ONI
-│   ├── permissions.py        # Command and path classification rules
-│   ├── gate.py               # User confirmation gate & prompt
-│   └── audit.py              # Append-only security audit log writer
-├── tasks/                    # Background worker daemons
-│   ├── short_term_worker.py  # Working memory → short-term promoter
-│   ├── long_term_worker.py   # Short-term → long-term archiver & pruner
-│   └── worker_process.py     # Isolated worker daemon subprocess
-├── tools/                    # Dynamic and manual Python tool files (gitignored)
-├── tests/                    # Unit tests and test suite (test_metrics, test_dag, ...)
-├── prompts/                  # LLM prompt templates
-│   ├── prompt_templates.py   # Interpreter, tool builder & tester prompts
-│   └── agent_prompt_templates.py # Agent builder, tester & debugger prompts
-└── logs/                     # Component logs and audit records (gitignored)
+├── main.py                     # Interactive shell & orchestrator
+├── core/                       # Core runtime package
+│   ├── config.py               # Central configuration manager (MAVISConfig)
+│   ├── caching.py              # SQLite semantic pipeline cache
+│   ├── tool_retriever.py       # SQLite categorical tool retriever
+│   ├── mcp_client.py           # Model Context Protocol (MCP) stdio client & schema mapper
+│   ├── answerer.py             # Presentation layer synthesizing final responses
+│   ├── metrics.py              # CSV telemetry emitter & aggregator
+│   ├── dag.py                  # DAG parsing & node dependencies
+│   ├── run_tool.py             # Subprocess sandbox for tool execution
+│   └── llm/                    # Provider-agnostic LLM interface (Gemini, OpenAI, Ollama)
+├── tool_builder/               # Autonomous tool builder, tester, & debug loop
+├── agent_builder/              # Cognitive sub-agent builder, Judge tester, & debugger
+├── agents/                     # Built-in and dynamically synthesized sub-agents
+├── memories/                   # Topic-subscribed memory subsystem
+│   ├── memory_store.py         # MemoryStore manager & topic subscriptions
+│   ├── neo4j_graph.py          # Neo4j property graph & native vector index
+│   ├── knowledge_extractor.py  # Decoupled background knowledge extraction
+│   └── embedding.py            # Vector embedding wrapper & cosine similarity
+├── oni/                        # ONI security harness (AST guard, permissions, approval gate)
+├── tasks/                      # Background daemons (episodic promotion, consolidation worker)
+├── data/                       # Configs, mcp_servers.json, registries, and SQLite databases
+├── docs/                       # Architecture specifications (Memory, Caching, Subagents, ONI)
+├── scripts/                    # Web dashboard (dashboard.py)
+└── tests/                      # Automated test suite (60+ unit and integration tests)
 ```
-
----
-
-## Troubleshooting
-
-### ChromaDB `KeyError: '_type'`
-If the ChromaDB on-disk schema was created with an incompatible version, run:
-```bash
-./scripts/reset_chroma.sh
-```
-This cleanly wipes stale vector collections across all namespaces and regenerates them fresh.
-

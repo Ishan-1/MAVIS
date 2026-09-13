@@ -149,29 +149,25 @@ ToolBuilder and Debugger are stateless within a pipeline step; they do not benef
 
 ### Namespace Architecture
 
-`MemoryStore` gains a `namespace` parameter. Each namespace is fully isolated on disk — its own ChromaDB collection and JSON directory. The existing flat `memories/short_term/` and `memories/long_term/` paths become `memories/interpreter/short_term/` and `memories/interpreter/long_term/`.
+`MemoryStore` gains a `namespace` parameter. Each namespace is fully isolated on disk — its own JSON directory and topic subscriptions in the Neo4j Knowledge Graph. The existing flat `memories/short_term/` and `memories/long_term/` paths become `memories/interpreter/short_term/` and `memories/interpreter/long_term/`.
 
 ```
 memories/
 ├── interpreter/
 │   ├── short_term/
-│   │   ├── chroma/          ← ChromaDB collection
 │   │   └── json/
 │   │       ├── 2026-08-26.json
 │   │       └── ...
 │   └── long_term/
-│       ├── chroma/
 │       └── json/
 │           ├── behaviours.json
 │           └── facts.json
 ├── toolbuilder/
 │   └── long_term/
-│       ├── chroma/
 │       └── json/
 │           └── patterns.json   ← successful build conventions
 └── debugger/
     └── long_term/
-        ├── chroma/
         └── json/
             └── fixes.json      ← failure→fix pairs
 ```
@@ -230,14 +226,14 @@ Entry format:
 }
 ```
 
-Entries are embedded and upserted into the namespace's ChromaDB collection so retrieval is semantic (not exact-match on error string).
+Entries are embedded and saved into the namespace's JSON storage and Neo4j so retrieval is semantic (not exact-match on error string).
 
 ---
 
 ### `MemoryStore` API Changes
 
 ```python
-# Construction — namespace selects the storage root
+# Construction — namespace selects the storage root and topic subscriptions
 interpreter_mem = MemoryStore(client, namespace="interpreter")
 toolbuilder_mem = MemoryStore(client, namespace="toolbuilder")
 debugger_mem    = MemoryStore(client, namespace="debugger")
@@ -245,7 +241,7 @@ debugger_mem    = MemoryStore(client, namespace="debugger")
 # Retrieval — cross-namespace peers passed as extra read sources
 context = toolbuilder_mem.retrieve_context(
     query,
-    extra_read_namespaces=["debugger"],   # read debugger LT at query time
+    extra_namespaces=["debugger"],   # read debugger LT at query time
 )
 
 # Write — always own namespace only (no extra_write_namespaces)
@@ -253,7 +249,7 @@ toolbuilder_mem.write_long_term(pattern_entry, ltype="pattern")
 debugger_mem.write_long_term(fix_entry, ltype="fix")
 ```
 
-`extra_read_namespaces` causes `retrieve_context` to query those namespaces' long-term ChromaDB collections and merge results (top-K per source, then union). Short-term is never cross-queried.
+`extra_namespaces` causes `retrieve_context` to query those namespaces' long-term JSON files and Neo4j topic subscriptions, then merge results (top-K per source, then union). Short-term is never cross-queried.
 
 ---
 
@@ -266,9 +262,9 @@ debugger_mem.write_long_term(fix_entry, ltype="fix")
 2. **Update path constants** in `memory_store.py` to derive from `namespace`.
 3. **Update `main.py`** — pass `namespace="interpreter"` when constructing `MemoryStore`.
 4. **Instantiate ToolBuilder and Debugger stores** in `main.py` and pass them into `ToolBuilder.__init__`.
-5. **Wire retrieval** in `ToolBuilder.build_tool()` — call `toolbuilder_mem.retrieve_context()` with `extra_read_namespaces=["debugger"]` before the build prompt.
+5. **Wire retrieval** in `ToolBuilder.build_tool()` — call `toolbuilder_mem.retrieve_context()` with `extra_namespaces=["debugger"]` before the build prompt.
 6. **Wire promotion** — after a clean first-pass build, call `toolbuilder_mem.write_long_term(pattern_entry)`. After a successful debug loop, call `debugger_mem.write_long_term(fix_entry)`.
-7. **Update `reset_chroma.sh`** to recreate all three namespace collections.
+7. **Neo4j integration**: Tool definitions and fixes register directly into the Neo4j graph without LLM round-trips.
 
 ---
 
