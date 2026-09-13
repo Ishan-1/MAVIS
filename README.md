@@ -12,14 +12,15 @@ MAVIS is **LLM provider-agnostic**, supporting cloud models (Google Gemini, Open
 User Input (text)
       │
       ▼
-handle_slash_command()       ← /config, /status, /trust, /metrics, /mcp, /save
+handle_slash_command()       ← /goal, /config, /status, /trust, /metrics, /mcp, /save
       │  (if standard prompt)
       ▼
 cache_manager.check_cache()  ──► [Cache Hit >0.95] ─────────► Answerer.synthesize() (sub-ms instant reply)
       │                      └─► [Pipeline Hit 0.85-0.95] ─► Fast LLM verify ──► execute_pipeline()
       ▼  (if miss)
-interpret_command()          ← Plans Heterogeneous DAG with Tool & Subagent nodes
-      │                          └─ Discovers & syncs external tools via Model Context Protocol (MCP)
+interpret_command() / /goal   ← Plans Heterogeneous DAG with Tool, Subagent, & Gate nodes
+      │                          ├─ Discovers & syncs external tools via Model Context Protocol (MCP)
+      │                          └─ /goal orchestrates iterative wave DAGs with ONI task-scoped lease
       ├─ missing tools?  ──► ToolBuilder.build_tool()
       │                          ├─ Queries past tooling patterns & debugger fixes
       │                          ├─ Generates Python module & scans AST (blocks dangerous imports)
@@ -36,17 +37,30 @@ interpret_command()          ← Plans Heterogeneous DAG with Tool & Subagent no
       ▼
 execute_pipeline()
       ├─ ONI pre-flight scan   ← Security gate: blacklist aborts, greylist requests confirmation
-      ├─ Dispatch nodes        ← Executes "tools" (sandboxed subprocess), "MCP tools" (stdio JSON-RPC), & "subagents" (in-memory LLM)
-      ├─ cache_manager.save()  ← Caches executed pipeline & results to SQLite
-      └─ Answerer.synthesize() ← Terminal presentation layer: quarantines raw tool data & synthesizes reply
+      ├─ Live output streaming ← Streams subprocess stderr/stdout live to terminal (no frozen screens)
+      ├─ Gate evaluation       ← Evaluates condition ($node.status == 0) & prunes untaken branches
+      ├─ Dispatch nodes        ← Executes "tools" (sandboxed subprocess), "MCP tools", & "subagents"
+      ├─ Scratchpad offload    ← Large outputs (>4KB) offloaded to data/scratch/ with pointer digest
+      ├─ node failure?         ──► PipelineDebugger.diagnose_and_repair()
+      │                                ├─ Diagnoses root cause from error message & prior outputs
+      │                                ├─ Patches parameters (e.g. path prefixes) or replaces node
+      │                                └─ Retries execution closed-loop (up to 2 attempts)
+      ├─ cache_manager.save()  ← Caches executed pipeline & results to SQLite (on success)
+      └─ Answerer.synthesize() ← Terminal presentation layer: synthesizes final output (or explains failures gracefully)
 ```
 
 ---
 
 ## Main Components & Unique Design Points
 
-### 1. Heterogeneous DAG & Terminal Answerer (`core/dag.py`, `core/answerer.py`)
-- **Tool Nodes vs. Sub-Agent Nodes**: Treats code execution and semantic reasoning as distinct primitives. Deterministic tasks run as isolated Python tools; cognitive/semantic tasks run as stateless in-memory subagents.
+### 1. Heterogeneous DAG, Gate Nodes, & Self-Healing Execution (`core/dag.py`, `core/gate_evaluator.py`, `core/pipeline_debugger.py`, `core/scratchpad.py`, `core/goal_runner.py`)
+- **Tool Nodes vs. Sub-Agent Nodes vs. Gate Nodes**: Treats deterministic code execution, cognitive reasoning, and conditional control flow as first-class primitives.
+- **Gate Nodes (`type: "gate"`) & Branch Pruning**: Supports deterministic evaluation (0 LLM tokens, $<1\text{ms}$ AST evaluator for conditions like `$n1.status == 0`, `len($n1.output) > 0`, `'failed' not in $n1.output.lower()`) and semantic NLP evaluations via LLM-as-a-Judge. Automatically sorts gates before dependent steps and prunes inactive branch subtrees.
+- **Autonomous Goal Runner (`/goal`)**: Executes high-level objectives across dynamically planned wave DAGs up to `max_iterations = 8`. Preserves strict mathematical acyclicity (preventing cycle errors) while enabling autonomous self-correction and looping. Runs under a single-prompt ONI Task-Scoped Lease.
+- **Live Output Streaming**: Subprocess execution prints live to the terminal line-by-line, providing immediate visual feedback during long compilation, test, or git tasks.
+- **Scratchpad Pointer Pattern (`core/scratchpad.py`)**: Automatically offloads tool outputs $>4\text{ KB}$ into `data/scratch/`, injecting compact Head/Tail summaries and file pointers into prompts to prevent token bloat while retaining 100% raw data fidelity.
+- **Closed-Loop Runtime Self-Healing (`PipelineDebugger`)**: Resolves live execution failures. When a tool or sub-agent fails, the debugger inspects the failure trace and prior node outputs, patches arguments (e.g. relative path resolution) or substitutes alternative nodes, and retries execution.
+- **Graceful Failure Handoff & Truthful Memory**: Unrecoverable failures pass partial outputs to the Answerer to converse naturally with the user about what went wrong, recording failures accurately with `tool_failure=True` so follow-up prompts retain complete context.
 - **Terminal Presentation Plane**: DAG execution is strictly for data acquisition. Raw outputs are quarantined within `<tool_data>` blocks and passed to the Answerer, eliminating prompt injection and infinite re-planning loops.
 
 ### 2. Tiered Memory & Topic-Subscribed Knowledge Graph (`memories/`)
@@ -57,10 +71,10 @@ execute_pipeline()
 - **Decoupled Promotion & Async Extraction**: Background daemons (`tasks/long_term_worker.py`) scan episodic turn deltas and extract structured entity triples asynchronously (`memories/knowledge_extractor.py`), keeping live conversational turns fast.
 - **Hybrid Dense-Graph Retrieval**: Uses Neo4j 5+ native vector indexing (`entity_embeddings`) to find seed entities, then traverses active 1-hop relationships within subscribed topics in a single Cypher query.
 - **Strict Topic Boundaries**:
-  - `interpreter`: Reads `["user.*", "env.*", "tooling.*", "agents.*"]`, writes `user.profile`.
-  - `toolbuilder` & `agent_debugger`: Read `["env.*", "tooling.*", "debugging.*"]`. **Hard-blocked from `user.*`**, protecting user privacy and eliminating context pollution in code generation.
-- **Deterministic Temporal Deduplication**: Functional 1-to-1 predicates (`PREFERS_EDITOR`, `HAS_OS`, `USES_SHELL`) automatically supersede prior active edges (`is_active = false, superseded_at = datetime()`), eliminating conflicting historical facts.
-- **Zero-LLM Subagent Writes**: ToolBuilder and Debugger register tool capabilities, AST rules, and prompt remedies directly into Neo4j without extra LLM overhead.
+  - `interpreter`: Reads `["user.*", "env.*", "tooling.*", "agents.*", "debugging.*"]`, writes `user.profile`.
+  - `toolbuilder`, `agent_debugger`, & `pipeline_debugger`: Read `["env.*", "tooling.*", "agents.*", "debugging.*"]`. **Hard-blocked from `user.*`**, protecting user privacy and eliminating context pollution in code/pipeline generation.
+- **Deterministic Temporal Deduplication**: Functional 1-to-1 predicates (`PREFERS_EDITOR`, `HAS_OS`, `USES_SHELL`) automatically supersede prior active edges (`is_active = false, superseded_at = datetime()`).
+- **Zero-LLM Subagent & Debugger Writes**: ToolBuilder, ToolDebugger, AgentDebugger, and PipelineDebugger register tool capabilities, AST rules, prompt remedies, and runtime DAG parameter repairs directly into Neo4j without extra LLM overhead.
 
 ### 3. Model Context Protocol (MCP) Integration (`core/mcp_client.py`)
 - **Stdio JSON-RPC Client**: Connects to external MCP servers defined in `data/mcp_servers.json` (or central config) over standard input/output.
@@ -71,6 +85,8 @@ execute_pipeline()
 ### 4. ONI Security Harness (`oni/`)
 - **Process Isolation**: All dynamic tools run in independent sandboxed subprocesses (`core/run_tool.py`).
 - **AST Code Guard**: Rejects scripts attempting forbidden imports (`subprocess`, `socket`, `pty`, `eval`) before execution.
+- **Safe Read Whitelist**: Read-only inspection commands (`ls`, `find`, `read_file_contents`, `read_and_concatenate_files`, `git status`) execute without interactive prompt interruption.
+- **Task-Scoped Execution Leases**: Long-running autonomous goals (`/goal`) acquire a temporary single-prompt task lease (`oni.acquire_task_lease()`), allowing iterative wave pipelines to complete without repetitive permission dialogs.
 - **Tiered Trust Levels**:
   - `ask`: Interactive user confirmation for write/network actions.
   - `yolo`: Automated execution for trusted sessions.
@@ -99,9 +115,9 @@ execute_pipeline()
 - Backed by an embedded SQLite registry.
 
 ### 8. Telemetry & Observability (`core/metrics.py`, `scripts/dashboard.py`)
-- **Append-Only CSV Streams**: High-throughput metric emissions in `data/metrics/`.
+- **Append-Only CSV Streams**: High-throughput metric emissions in `data/metrics/` across all components (including `gate_evaluator`, `goal_runner`, and `pipeline_debugger`).
 - **Zero-Join Analytics**: Fast aggregations (Average, Median, Max) per component.
-- **Lazy Turn Trace Inspector**: Reconstructs end-to-end execution lifecycles by correlating `turn_id`.
+- **Turn & Goal Wave Trace Inspector**: Reconstructs end-to-end execution lifecycles by lazily correlating `turn_id` or `goal_id`, visualizing multi-wave DAG progressions, gate decisions, and debugger repairs.
 - **Local Streamlit Dashboard**: Web UI accessible via `/dashboard` at `http://localhost:8501`.
 
 ### 9. Provider-Agnostic LLM Layer (`core/llm/`)
@@ -163,6 +179,7 @@ Control MAVIS dynamically inside the interactive shell:
 
 ```bash
 /help                           # View help and command assistance
+/goal <description>             # Run autonomous multi-wave goal execution until completed
 /status                         # View heartbeats, worker processes, and memory state
 /metrics [session]              # Print terminal performance and latency tables
 /dashboard                      # Launch local Streamlit observability dashboard
@@ -190,9 +207,13 @@ MAV/
 │   ├── caching.py              # SQLite semantic pipeline cache
 │   ├── tool_retriever.py       # SQLite categorical tool retriever
 │   ├── mcp_client.py           # Model Context Protocol (MCP) stdio client & schema mapper
+│   ├── goal_runner.py          # Autonomous multi-wave goal execution engine
+│   ├── gate_evaluator.py       # Deterministic AST and NLP gate node evaluator
+│   ├── pipeline_debugger.py    # Closed-loop live DAG execution debugger & repair
+│   ├── scratchpad.py           # Scratchpad disk offload (>4KB) with head/tail digests
 │   ├── answerer.py             # Presentation layer synthesizing final responses
 │   ├── metrics.py              # CSV telemetry emitter & aggregator
-│   ├── dag.py                  # DAG parsing & node dependencies
+│   ├── dag.py                  # DAG parsing, topological sorting & branch pruning
 │   ├── run_tool.py             # Subprocess sandbox for tool execution
 │   └── llm/                    # Provider-agnostic LLM interface (Gemini, OpenAI, Ollama)
 ├── tool_builder/               # Autonomous tool builder, tester, & debug loop
@@ -203,10 +224,11 @@ MAV/
 │   ├── neo4j_graph.py          # Neo4j property graph & native vector index
 │   ├── knowledge_extractor.py  # Decoupled background knowledge extraction
 │   └── embedding.py            # Vector embedding wrapper & cosine similarity
-├── oni/                        # ONI security harness (AST guard, permissions, approval gate)
+├── oni/                        # ONI security harness (AST guard, permissions, task leases)
 ├── tasks/                      # Background daemons (episodic promotion, consolidation worker)
-├── data/                       # Configs, mcp_servers.json, registries, and SQLite databases
+├── data/                       # Configs, mcp_servers.json, registries, SQLite databases
+│   └── scratch/                # Automatic disk scratchpad for large step outputs
 ├── docs/                       # Architecture specifications (Memory, Caching, Subagents, ONI)
-├── scripts/                    # Web dashboard (dashboard.py)
-└── tests/                      # Automated test suite (60+ unit and integration tests)
+├── scripts/                    # Web dashboard (dashboard.py with Turn & Wave Inspector)
+└── tests/                      # Automated test suite (60 unit and integration tests)
 ```

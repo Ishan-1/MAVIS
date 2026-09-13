@@ -36,12 +36,20 @@ tool_builder = ToolBuilder(llm)
 from agent_builder import AgentBuilder
 from core.answerer import Answerer
 from core.agents import load_agent
+from core.pipeline_debugger import PipelineDebugger
 agent_builder = AgentBuilder(llm)
 answerer = Answerer(llm)
 memory_store = MemoryStore(llm, namespace="interpreter")
+pipeline_debugger_mem = MemoryStore(llm, namespace="pipeline_debugger")
+pipeline_debugger = PipelineDebugger(llm, memory_store=pipeline_debugger_mem)
 tool_retriever = ToolRetriever(llm)
-from core.dag import validate_and_sort_dag, resolve_params
+from core.dag import validate_and_sort_dag, resolve_params, compute_pruned_nodes, extract_node_dependencies
+from core.gate_evaluator import evaluate_gate
+from core.scratchpad import spill_if_large
 from core.caching import cache_manager
+from core.goal_runner import GoalRunner
+
+goal_runner: GoalRunner | None = None
 
 # ── Central config + ONI ────────────────────────────────────────────────────────────
 from core.config import cfg
@@ -107,6 +115,7 @@ _SLASH_SUBCOMMANDS = {
     "/metrics": [],
     "/dashboard": [],
     "/mcp": ["status", "list", "reload"],
+    "/goal": [],
 }
 
 _COMMAND_METAS = {
@@ -122,6 +131,7 @@ _COMMAND_METAS = {
     "/greylist": "Add command to ONI greylist",
     "/unlist": "Remove command from all ONI lists",
     "/mcp": "Inspect or manage MCP servers and tools",
+    "/goal": "Execute an autonomous multi-wave goal until completed",
 }
 
 _SUBCOMMAND_METAS = {
@@ -255,6 +265,7 @@ _HELP_ROWS = [
     ("/greylist <cmd>",          "Add to ONI greylist."),
     ("/unlist <cmd>",            "Remove from all ONI lists."),
     ("/mcp [status|list|reload]","Inspect, list, or reload MCP servers and tools."),
+    ("/goal <description>",      "Autonomous multi-wave goal execution until completed."),
 ]
 
 
@@ -340,6 +351,40 @@ def handle_slash_command(raw: str) -> bool:
         print_table(_HELP_ROWS)
         mavis_print("  [dim]Tip: type [bold]/[/bold] then Tab to browse commands.[/dim]")
         rule()
+        return True
+
+    # ── /goal <description> ──────────────────────────────────────────────────
+    if verb == "/goal":
+        goal_text = raw[len(parts[0]):].strip()
+        if not goal_text:
+            mavis_error("Please specify a goal, e.g.: /goal run all tests and fix errors")
+            return True
+        agents_list = [
+            a.replace(".py", "")
+            for a in os.listdir("agents")
+            if a.endswith(".py") and not a.startswith("__")
+        ] if os.path.exists("agents") else []
+        turn_id = uuid.uuid4().hex[:8]
+        _session_chat.append({
+            "role": "user",
+            "content": raw,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        if goal_runner:
+            res = goal_runner.run_goal(
+                goal=goal_text,
+                max_iterations=8,
+                turn_id=turn_id,
+                commands_list=commands_list,
+                agents_list=agents_list,
+            )
+            _session_chat.append({
+                "role": "assistant",
+                "content": f"Goal Status: {res.get('status')}\nSummary: {res.get('summary')}",
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        else:
+            mavis_error("Goal runner is not initialized.")
         return True
 
     # ── /save [filename] ──────────────────────────────────────────────────────
@@ -769,6 +814,9 @@ def call_command(command_name, params_dict):
                         sel.unregister(proc.stderr)
                         continue
                     stderr_lines.append(line)
+                    clean_line = line.rstrip("\r\n")
+                    if clean_line:
+                        mavis_print(f"  [dim]│ [{command_name}] {clean_line}[/dim]")
 
         proc.wait()
 
@@ -776,6 +824,10 @@ def call_command(command_name, params_dict):
             rem_err = proc.stderr.read()
             if rem_err:
                 stderr_lines.append(rem_err)
+                for l in rem_err.splitlines():
+                    clean_l = l.rstrip("\r\n")
+                    if clean_l:
+                        mavis_print(f"  [dim]│ [{command_name}] {clean_l}[/dim]")
         except Exception:
             pass
 
@@ -874,102 +926,137 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
         return
 
     node_results = {}
+    skipped_nodes: set[str] = set()
+    nodes_by_id = {n["id"]: n for n in sorted_pipeline}
+    node_deps: dict[str, set[str]] = {}
+    for nid, n in nodes_by_id.items():
+        node_deps[nid] = extract_node_dependencies(n)
+    for nid, n in nodes_by_id.items():
+        if n.get("type") == "gate":
+            targets = []
+            for k in ("if_true", "if_false"):
+                v = n.get(k)
+                if isinstance(v, str):
+                    targets.append(v)
+                elif isinstance(v, list):
+                    targets.extend(v)
+            for t in targets:
+                if t in nodes_by_id:
+                    node_deps[t].add(nid)
+
     mavis_status("Starting pipeline execution...")
+    max_debug_retries = 2
+    execution_failed = False
+    failed_node_id = ""
+    failure_error_msg = ""
 
     for node in sorted_pipeline:
         node_id = node["id"]
-        node_type = node.get("type", "tool")
-        command_name = node["function_name"]
-        params = node.get("params", {})
+        if node_id in skipped_nodes:
+            mavis_status(f"Step '{node_id}' skipped (branch not taken).")
+            node_results[node_id] = {"status": "skipped", "output": None, "result": None}
+            continue
 
-        mavis_status(f"Running step '{node_id}' ({node_type}): {command_name}")
+        current_node = dict(node)
+        current_type = current_node.get("type", "tool")
+        current_command = current_node.get("function_name", "gate" if current_type == "gate" else "")
+        current_params = dict(current_node.get("params", {}))
 
-        try:
-            resolved_params, res_err = resolve_params(params, node_results)
-            if res_err:
-                mavis_error(
-                    f"Pipeline aborted: step '{node_id}' resolution error: {res_err}"
-                )
-                latency_ms = round((time.perf_counter() - _pipeline_start) * 1000, 2)
-                _dag_emitter.log({
-                    "turn_id": turn_id,
-                    "start_time": datetime.now().isoformat(),
-                    "end_time": datetime.now().isoformat(),
-                    "latency_ms": latency_ms,
-                    "status": "node_failed",
-                    "dag_size": dag_size,
-                    "dag_depth": dag_depth,
-                    "tool_nodes_count": tool_nodes_count,
-                    "subagent_nodes_count": subagent_nodes_count,
-                    "failed_node_id": node_id,
-                })
-                return
+        if current_type == "gate":
+            mavis_status(f"Evaluating gate '{node_id}'...")
+            verdict, active_nodes, inactive_nodes = evaluate_gate(current_node, node_results, client=llm)
+            mavis_ok(f"Gate '{node_id}' evaluated to: {verdict} (active branch: {active_nodes or 'default'})")
+            node_results[node_id] = {"verdict": verdict, "status": 0, "output": verdict, "result": verdict}
+            newly_pruned = compute_pruned_nodes(current_node, verdict, nodes_by_id, node_deps)
+            if newly_pruned:
+                skipped_nodes.update(newly_pruned)
+                mavis_status(f"Gate '{node_id}' pruned step(s): {', '.join(sorted(newly_pruned))}")
+            continue
 
-            if node_type == "subagent":
-                agent = load_agent(command_name, llm)
-                if not agent:
-                    mavis_error(f"Pipeline aborted: subagent '{command_name}' not found.")
-                    latency_ms = round((time.perf_counter() - _pipeline_start) * 1000, 2)
-                    _dag_emitter.log({
-                        "turn_id": turn_id,
-                        "start_time": datetime.now().isoformat(),
-                        "end_time": datetime.now().isoformat(),
-                        "latency_ms": latency_ms,
-                        "status": "node_failed",
-                        "dag_size": dag_size,
-                        "dag_depth": dag_depth,
-                        "tool_nodes_count": tool_nodes_count,
-                        "subagent_nodes_count": subagent_nodes_count,
-                        "failed_node_id": node_id,
-                    })
-                    return
-                status, result = agent.run(turn_id=turn_id, **resolved_params)
-            elif mcp_manager.is_mcp_tool(command_name):
-                status, result = mcp_manager.call_tool(command_name, resolved_params)
-            else:
-                status, result = call_command(command_name, resolved_params)
+        retry_count = 0
+        node_success = False
 
-            # Contract verification: 1st element MUST be int status code, 2nd is output
-            if not isinstance(status, int):
-                mavis_error(f"Step '{node_id}' ({command_name}) returned invalid status type: {type(status).__name__}. Aborting pipeline.")
-                latency_ms = round((time.perf_counter() - _pipeline_start) * 1000, 2)
-                _dag_emitter.log({
-                    "turn_id": turn_id,
-                    "start_time": datetime.now().isoformat(),
-                    "end_time": datetime.now().isoformat(),
-                    "latency_ms": latency_ms,
-                    "status": "node_failed",
-                    "dag_size": dag_size,
-                    "dag_depth": dag_depth,
-                    "tool_nodes_count": tool_nodes_count,
-                    "subagent_nodes_count": subagent_nodes_count,
-                    "failed_node_id": node_id,
-                })
-                return
+        mavis_status(f"Running step '{node_id}' ({current_type}): {current_command}")
+
+        while retry_count <= max_debug_retries:
+            try:
+                resolved_params, res_err = resolve_params(current_params, node_results)
+                if res_err:
+                    status = -1
+                    result = f"Parameter resolution error: {res_err}"
+                else:
+                    if current_type == "subagent":
+                        agent = load_agent(current_command, llm)
+                        if not agent:
+                            status = -1
+                            result = f"Subagent '{current_command}' not found."
+                        else:
+                            status, result = agent.run(turn_id=turn_id, **resolved_params)
+                    elif mcp_manager.is_mcp_tool(current_command):
+                        status, result = mcp_manager.call_tool(current_command, resolved_params)
+                    else:
+                        status, result = call_command(current_command, resolved_params)
+
+                if not isinstance(status, int):
+                    status = -1
+                    result = f"Invalid return status type from '{current_command}': {type(status).__name__}"
+
+            except Exception as e:
+                status = -1
+                result = f"Exception executing step '{node_id}': {e}"
 
             if status == 0:
-                # 2nd element is the actual output received
-                node_results[node_id] = result
+                compact_result, scratch_path = spill_if_large(turn_id, node_id, result)
+                if scratch_path:
+                    mavis_status(f"Step '{node_id}' output offloaded to scratchpad: {scratch_path}")
+                node_results[node_id] = compact_result
+                node_success = True
+                if retry_count > 0:
+                    mavis_ok(f"Step '{node_id}' recovered and executed successfully after {retry_count} repair(s).")
+                else:
+                    mavis_ok(f"'{current_command}' executed successfully.")
+                break
             else:
-                # Proper error handling: non-zero status aborts pipeline with error payload
-                mavis_error(f"Step '{node_id}' ({command_name}) failed with status {status}: {result}. Aborting pipeline.")
-                latency_ms = round((time.perf_counter() - _pipeline_start) * 1000, 2)
-                _dag_emitter.log({
-                    "turn_id": turn_id,
-                    "start_time": datetime.now().isoformat(),
-                    "end_time": datetime.now().isoformat(),
-                    "latency_ms": latency_ms,
-                    "status": "node_failed",
-                    "dag_size": dag_size,
-                    "dag_depth": dag_depth,
-                    "tool_nodes_count": tool_nodes_count,
-                    "subagent_nodes_count": subagent_nodes_count,
-                    "failed_node_id": node_id,
-                })
-                return
+                err_str = str(result)
+                if retry_count < max_debug_retries:
+                    mavis_status(f"[PipelineDebugger] Step '{node_id}' ({current_command}) failed: {err_str[:120]}. Diagnosing...")
+                    repair_plan = pipeline_debugger.diagnose_and_repair(
+                        failed_node=current_node,
+                        resolved_params=resolved_params if not res_err else current_params,
+                        error_message=err_str,
+                        node_results=node_results,
+                        user_query=query,
+                        commands_list=commands_list,
+                        agents_list=agents_list,
+                        turn_id=turn_id,
+                    )
+                    action = repair_plan.get("action")
+                    diagnosis = repair_plan.get("diagnosis", "")
+                    patched = repair_plan.get("patched_node")
 
-        except Exception as e:
-            mavis_error(f"Critical error at step '{node_id}': {e}")
+                    if action in ("patch_params", "replace_node") and isinstance(patched, dict):
+                        mavis_status(f"[PipelineDebugger] Repair action ({action}): {diagnosis} Retrying...")
+                        current_node = patched
+                        current_command = patched.get("function_name", current_command)
+                        current_type = patched.get("type", current_type)
+                        current_params = patched.get("params", {})
+                        retry_count += 1
+                        continue
+                    else:
+                        mavis_error(f"[PipelineDebugger] Step '{node_id}' failure unrecoverable: {diagnosis}")
+                        failure_error_msg = err_str
+                        break
+                else:
+                    mavis_error(f"Step '{node_id}' ({current_command}) failed after {retry_count} repair attempts: {err_str}")
+                    failure_error_msg = err_str
+                    break
+
+        if not node_success:
+            execution_failed = True
+            failed_node_id = node_id
+            if not failure_error_msg:
+                failure_error_msg = f"Step '{node_id}' failed."
+            node_results[node_id] = f"FAILED: {failure_error_msg}"
             latency_ms = round((time.perf_counter() - _pipeline_start) * 1000, 2)
             _dag_emitter.log({
                 "turn_id": turn_id,
@@ -983,24 +1070,25 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
                 "subagent_nodes_count": subagent_nodes_count,
                 "failed_node_id": node_id,
             })
-            return
+            break
 
     elapsed_s = time.perf_counter() - _pipeline_start
     latency_ms = round(elapsed_s * 1000, 2)
-    mavis_status("Pipeline finished.")
 
-    _dag_emitter.log({
-        "turn_id": turn_id,
-        "start_time": datetime.now().isoformat(),
-        "end_time": datetime.now().isoformat(),
-        "latency_ms": latency_ms,
-        "status": "success",
-        "dag_size": dag_size,
-        "dag_depth": dag_depth,
-        "tool_nodes_count": tool_nodes_count,
-        "subagent_nodes_count": subagent_nodes_count,
-        "failed_node_id": "",
-    })
+    if not execution_failed:
+        mavis_status("Pipeline finished.")
+        _dag_emitter.log({
+            "turn_id": turn_id,
+            "start_time": datetime.now().isoformat(),
+            "end_time": datetime.now().isoformat(),
+            "latency_ms": latency_ms,
+            "status": "success",
+            "dag_size": dag_size,
+            "dag_depth": dag_depth,
+            "tool_nodes_count": tool_nodes_count,
+            "subagent_nodes_count": subagent_nodes_count,
+            "failed_node_id": "",
+        })
 
     if node_results and pipeline:
         final_answer = answerer.synthesize(
@@ -1021,7 +1109,10 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
     if elapsed_s >= threshold:
         _notify("MAVIS: Pipeline complete", f"Finished in {elapsed_s:.1f}s")
 
-    return node_results
+    return None if execution_failed else node_results
+
+
+goal_runner = GoalRunner(llm=llm, execute_pipeline_fn=execute_pipeline, memory_store=memory_store)
 
 
 # ── Interpreter ───────────────────────────────────────────────────────────────
@@ -1308,6 +1399,7 @@ def interpret_command(command: str) -> bool:
     memory_store.add_turn(
         role="assistant",
         content=last_assistant_text or f"Executed pipeline: {pipeline_summary}",
+        tool_failure=(res is None),
     )
     return True
 

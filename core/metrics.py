@@ -62,6 +62,15 @@ CSV_SCHEMAS: dict[str, list[str]] = {
         "compaction_triggered", "tokens_freed", "turns_evaluated",
         "turns_promoted", "facts_consolidated"
     ],
+    "pipeline_debugger": [
+        "timestamp", "turn_id", "node_id", "action", "latency_ms", "success"
+    ],
+    "gate_evaluator": [
+        "timestamp", "turn_id", "gate_id", "mode", "condition", "verdict", "latency_ms"
+    ],
+    "goal_runner": [
+        "timestamp", "goal_id", "goal", "status", "waves_executed", "total_steps", "duration_s"
+    ],
 }
 
 
@@ -415,19 +424,35 @@ def format_metrics_tables(since_timestamp: float | None = None) -> list[Table]:
 
 def get_turn_trace(turn_id: str) -> list[dict[str, Any]]:
     """
-    On-demand lazy cross-file join for a single turn_id.
-    Searches all CSVs to build a full trace timeline for that query.
+    On-demand lazy cross-file join for a single turn_id or goal_id.
+    Searches all CSVs to build a full trace timeline for that query,
+    including across all constituent DAG waves if inspecting a goal.
     """
     trace: list[dict[str, Any]] = []
-    categories = ["interpreter", "caching", "dag_execution", "subagents", "answerer", "oni", "memory"]
+    categories = [
+        "interpreter", "caching", "dag_execution", "subagents",
+        "answerer", "oni", "memory", "pipeline_debugger", "gate_evaluator", "goal_runner"
+    ]
+
+    target = str(turn_id).strip()
 
     for cat in categories:
         rows = _read_csv_rows(cat)
-        matched = [r for r in rows if r.get("turn_id") == turn_id]
-        for m in matched:
-            event = dict(m)
-            event["component"] = cat
-            trace.append(event)
+        for r in rows:
+            r_turn = str(r.get("turn_id", "")).strip()
+            r_goal = str(r.get("goal_id", "")).strip()
+            
+            # Match exact turn_id, goal_id, or wave-based turn_id prefix (e.g. goal_123_wave1)
+            is_match = (
+                r_turn == target
+                or r_goal == target
+                or (r_turn.startswith(f"{target}_wave"))
+                or (target.startswith("goal_") and target in r_turn)
+            )
+            if is_match:
+                event = dict(r)
+                event["component"] = cat
+                trace.append(event)
 
     trace.sort(key=lambda x: x.get("timestamp", ""))
     return trace

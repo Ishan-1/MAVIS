@@ -336,6 +336,28 @@ class Neo4jKnowledgeGraph:
         self.add_fact(agent_name, "FAILED_WITH", failure_reason[:100], "agents.debugging", is_functional=False)
         self.add_fact(failure_reason[:100], "RESOLVED_BY", prompt_remedy[:200], "agents.debugging", is_functional=False)
 
+    def add_pipeline_fix(
+        self,
+        command_name: str,
+        error_snippet: str,
+        fix_summary: str,
+        client: Any = None,
+    ):
+        """Record live pipeline execution failure and parameter/node repair in debugging.pipeline_fixes topic."""
+        if not self.is_available():
+            return
+
+        cmd_id = f"command:{_slugify(command_name)}"
+        err_id = f"error:{_slugify(error_snippet[:40])}"
+        fix_id = f"pipeline_fix:{_slugify(fix_summary[:40])}"
+
+        self.upsert_entity(cmd_id, command_name, "tooling.tools", "Tool")
+        self.upsert_entity(err_id, error_snippet[:100], "debugging.pipeline_fixes", "Error")
+        self.upsert_entity(fix_id, fix_summary[:200], "debugging.pipeline_fixes", "PipelineFix")
+
+        self.add_fact(command_name, "FAILED_IN_PIPELINE", error_snippet[:100], "debugging.pipeline_fixes", is_functional=False)
+        self.add_fact(error_snippet[:100], "RESOLVED_BY_PIPELINE_FIX", fix_summary[:200], "debugging.pipeline_fixes", is_functional=False)
+
     # ── Retrieval ──────────────────────────────────────────────────────────────
 
     def query_active_facts(

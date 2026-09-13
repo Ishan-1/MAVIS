@@ -44,11 +44,95 @@ def extract_dependencies_from_value(value: Any) -> set[str]:
 
 
 def extract_node_dependencies(node: dict) -> set[str]:
-    """Extract all node ID dependencies referenced in a node's params."""
+    """Extract all node ID dependencies referenced in a node's params, conditions, or explicit deps."""
+    deps: set[str] = set()
+
+    # 1. Explicit dependencies: "dependencies": ["n1"] or "deps": ["n1"]
+    explicit_deps = node.get("dependencies") or node.get("deps")
+    if isinstance(explicit_deps, list):
+        deps.update(str(d) for d in explicit_deps if d)
+    elif isinstance(explicit_deps, str) and explicit_deps:
+        deps.add(explicit_deps)
+
+    # 2. Gate condition dependencies: "condition": "$n1.status == 0"
+    if node.get("type") == "gate":
+        cond = node.get("condition") or node.get("condition_str", "")
+        if isinstance(cond, str):
+            for m in DEP_SEARCH_RE.finditer(cond):
+                deps.add(m.group(1))
+
+    # 3. Parameter references
     params = node.get("params")
-    if not isinstance(params, dict):
-        return set()
-    return extract_dependencies_from_value(params)
+    if isinstance(params, (dict, list, str)):
+        deps.update(extract_dependencies_from_value(params))
+
+    return deps
+
+
+def get_downstream_nodes(
+    start_nodes: set[str] | list[str],
+    nodes_by_id: dict[str, dict],
+    node_deps: dict[str, set[str]],
+) -> set[str]:
+    """Find all nodes that depend directly or transitively on start_nodes."""
+    visited = set(start_nodes)
+    queue = list(start_nodes)
+    while queue:
+        curr = queue.pop(0)
+        for nid, deps in node_deps.items():
+            if curr in deps and nid not in visited:
+                visited.add(nid)
+                queue.append(nid)
+    return visited
+
+
+def compute_pruned_nodes(
+    gate_node: dict,
+    verdict: bool,
+    nodes_by_id: dict[str, dict],
+    node_deps: dict[str, set[str]],
+) -> set[str]:
+    """
+    Given an evaluated gate node and its verdict, return set of node IDs
+    that should be skipped because their branch was not taken.
+    """
+    if_true = gate_node.get("if_true", [])
+    if isinstance(if_true, str):
+        if_true = [if_true]
+    elif not isinstance(if_true, list):
+        if_true = []
+
+    if_false = gate_node.get("if_false", [])
+    if isinstance(if_false, str):
+        if_false = [if_false]
+    elif not isinstance(if_false, list):
+        if_false = []
+
+    active_entry_nodes = set(if_true if verdict else if_false)
+    inactive_entry_nodes = set(if_false if verdict else if_true)
+
+    pruned: set[str] = set()
+
+    # Prune inactive branch targets and their exclusive downstream nodes
+    if inactive_entry_nodes:
+        inactive_subtree = get_downstream_nodes(inactive_entry_nodes, nodes_by_id, node_deps)
+        active_subtree = get_downstream_nodes(active_entry_nodes, nodes_by_id, node_deps) if active_entry_nodes else set()
+        pruned.update(inactive_subtree - active_subtree)
+
+    # Also prune nodes explicitly marked with the opposite branch tag
+    gate_id = gate_node.get("id")
+    for nid, node in nodes_by_id.items():
+        node_branch = str(node.get("branch", "")).lower()
+        if not node_branch:
+            continue
+        # If node belongs to this gate
+        if gate_id in node_deps.get(nid, set()):
+            if verdict and node_branch in ("false", "if_false", "no"):
+                pruned.add(nid)
+            elif (not verdict) and node_branch in ("true", "if_true", "yes"):
+                pruned.add(nid)
+
+    return pruned
 
 
 def validate_and_sort_dag(pipeline: list[dict]) -> tuple[list[dict] | None, str | None]:
@@ -83,15 +167,30 @@ def validate_and_sort_dag(pipeline: list[dict]) -> tuple[list[dict] | None, str 
     node_deps: dict[str, set[str]] = {}
     for node_id, node in nodes_by_id.items():
         deps = extract_node_dependencies(node)
-        # Check for self-dependencies
+        node_deps[node_id] = deps
+
+    # Gate nodes implicitly precede their branch target nodes
+    for node_id, node in nodes_by_id.items():
+        if node.get("type") == "gate":
+            targets = []
+            for k in ("if_true", "if_false"):
+                v = node.get(k)
+                if isinstance(v, str):
+                    targets.append(v)
+                elif isinstance(v, list):
+                    targets.extend(v)
+            for t in targets:
+                if t in nodes_by_id:
+                    node_deps[t].add(node_id)
+
+    # Verify self-deps and dangling references
+    for node_id, deps in node_deps.items():
         if node_id in deps:
             return None, f"Pipeline dependency cycle: step '{node_id}' depends on itself."
-        # Check for dangling dependencies (referencing non-existent nodes)
         missing_deps = [d for d in deps if d not in nodes_by_id]
         if missing_deps:
             missing_str = ", ".join(f"'{d}'" for d in sorted(missing_deps))
             return None, f"Pipeline dependency error: step '{node_id}' references unknown step(s): {missing_str}."
-        node_deps[node_id] = deps
 
     # Build graph and perform topological sort
     ts: TopologicalSorter = TopologicalSorter()

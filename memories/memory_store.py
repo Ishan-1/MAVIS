@@ -31,7 +31,7 @@ _METRICS_EMITTER = MetricEmitter("memory")
 
 _DEFAULT_TOPICS = {
     "interpreter": {
-        "read": ["user.*", "env.*", "tooling.*", "agents.*"],
+        "read": ["user.*", "env.*", "tooling.*", "agents.*", "debugging.*"],
         "write": "user.profile",
     },
     "toolbuilder": {
@@ -45,6 +45,10 @@ _DEFAULT_TOPICS = {
     "agent_debugger": {
         "read": ["env.*", "agents.*", "debugging.*"],
         "write": "agents.debugging",
+    },
+    "pipeline_debugger": {
+        "read": ["env.*", "tooling.*", "agents.*", "debugging.*"],
+        "write": "debugging.pipeline_fixes",
     },
     "tasks": {
         "read": ["env.*", "tooling.*", "tasks.*"],
@@ -145,6 +149,7 @@ class MemoryStore:
             "toolbuilder": ("patterns.json",),
             "debugger": ("fixes.json",),
             "agent_debugger": ("fixes.json",),
+            "pipeline_debugger": ("fixes.json",),
             "tasks": ("events.json",),
         }.get(namespace, ("facts.json",))
 

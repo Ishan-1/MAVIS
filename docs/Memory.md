@@ -282,10 +282,11 @@ Facts and entity relationships are tagged with hierarchical topics:
 
 | Component / Subagent | Subscribed Read Topics | Write Topic | User Personal Data Access |
 |---|---|---|:---:|
-| **Interpreter** | `["user.*", "env.*", "tooling.*", "agents.*"]` | `user.profile` | Full Access |
+| **Interpreter** | `["user.*", "env.*", "tooling.*", "agents.*", "debugging.*"]` | `user.profile` | Full Access |
 | **ToolBuilder** | `["env.*", "tooling.*", "debugging.*"]` | `tooling.tools` | ❌ **Hard Blocked** |
 | **ToolDebugger** | `["env.*", "tooling.*", "debugging.*"]` | `debugging.fixes` | ❌ **Hard Blocked** |
 | **AgentBuilder / AgentDebugger** | `["env.*", "agents.*", "debugging.*"]` | `agents.debugging` | ❌ **Hard Blocked** |
+| **PipelineDebugger** | `["env.*", "tooling.*", "agents.*", "debugging.*"]` | `debugging.pipeline_fixes` | ❌ **Hard Blocked** |
 
 #### 2. Hybrid Dense-Graph Retrieval (Single Cypher Query)
 
@@ -299,4 +300,4 @@ When `MemoryStore.retrieve_context(query)` is called:
 
 - **Temporal Contradiction Resolution**: Functional 1-to-1 predicates (e.g. `PREFERS_EDITOR`, `HAS_OS`, `USES_SHELL`) automatically supersede prior active edges (`SET r.is_active = false, r.superseded_at = datetime()`).
 - **Decoupled Extraction**: The live Interpreter does **not** extract triples during user turns. An async extraction worker (`memories/knowledge_extractor.py`) processes turns in `tasks/long_term_worker.py` to write `user.*` and `env.*` triples.
-- **Zero-LLM Subagent Writes**: ToolBuilder, ToolDebugger, and AgentBuilder write structural nodes and relationships directly from Python AST, pytest traces, and Judge results.
+- **Zero-LLM Subagent & Debugger Writes**: ToolBuilder, ToolDebugger, AgentBuilder, and PipelineDebugger write structural nodes and relationships directly from Python AST, pytest traces, Judge results, and runtime DAG repairs.

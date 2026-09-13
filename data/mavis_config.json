@@ -19,7 +19,12 @@
             "tail",
             "sort",
             "uniq",
-            "notify-send"
+            "notify-send",
+            "ls",
+            "find",
+            "read_file_contents",
+            "read_and_concatenate_files",
+            "git status"
         ],
         "greylist": [
             "restart_process",
@@ -39,7 +44,8 @@
             "tests/",
             "memories/",
             "logs/",
-            "data/"
+            "data/",
+            "data/scratch/"
         ],
         "approved_fs_files": [
             "requirements.txt"

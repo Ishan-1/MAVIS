@@ -285,6 +285,21 @@ with tab_dag:
         st.markdown("**DAG Executions Log**")
         st.dataframe(df_dag.tail(50), use_container_width=True)
 
+        df_goal = load_component_csv("goal_runner")
+        df_goal = filter_by_time(df_goal, time_cutoff)
+        if not df_goal.empty:
+            st.divider()
+            st.markdown("#### 🎯 Autonomous Goal Runs & Wave Progressions")
+            g1, g2, g3, g4 = st.columns(4)
+            g1.metric("Goals Initiated", f"{len(df_goal):,}")
+            completed_goals = (df_goal["status"] == "completed").sum() if "status" in df_goal.columns else 0
+            g2.metric("Goals Completed", f"{completed_goals:,}")
+            avg_waves = df_goal["waves_executed"].mean() if "waves_executed" in df_goal.columns else 0.0
+            g3.metric("Avg Waves / Goal", f"{avg_waves:.1f}")
+            avg_dur = df_goal["duration_s"].mean() if "duration_s" in df_goal.columns else 0.0
+            g4.metric("Avg Duration", f"{avg_dur:.1f}s")
+            st.dataframe(df_goal.tail(25), use_container_width=True)
+
 # ── Tab 5: Builders & Agents ─────────────────────────────────────────────────
 with tab_builders:
     st.subheader("Synthesis & Synthesis Debugging Telemetry")
@@ -347,37 +362,95 @@ with tab_memory:
 
             st.dataframe(df_oni.tail(20), use_container_width=True)
 
-# ── Tab 7: Turn Trace Inspector (On-Demand Lazy Join) ─────────────────────────
+# ── Tab 7: Turn & Goal Wave Trace Inspector (On-Demand Lazy Join) ─────────────
 with tab_trace:
-    st.subheader("🔍 Turn Trace Inspector (On-Demand Lazy Join)")
-    st.caption("Drill down into a single turn to reconstruct the full end-to-end execution path.")
+    st.subheader("🔍 Turn & Goal Wave Trace Inspector (On-Demand Lazy Join)")
+    st.caption("Drill down into a single turn or an autonomous multi-wave goal to reconstruct the full end-to-end execution path.")
 
-    # Collect available turn_ids from interpreter table
+    # Collect available turn_ids and goal_ids
     df_interp = load_component_csv("interpreter")
-    recent_turns = []
-    if not df_interp.empty and "turn_id" in df_interp.columns:
-        recent_turns = [t for t in df_interp["turn_id"].dropna().unique().tolist() if t]
+    df_goal = load_component_csv("goal_runner")
 
-    target_turn_id = st.selectbox(
-        "Select Turn ID to Inspect",
-        options=[""] + list(reversed(recent_turns)),
-        help="Select a turn_id to lazily scan and join records across all component CSVs.",
+    recent_options: list[tuple[str, str]] = []
+
+    if not df_goal.empty and "goal_id" in df_goal.columns:
+        for _, row in df_goal.tail(25).iterrows():
+            gid = str(row.get("goal_id", ""))
+            goal_text = str(row.get("goal", ""))[:45]
+            status = str(row.get("status", ""))
+            recent_options.append((f"🎯 [GOAL] {gid} ({status}): {goal_text}", gid))
+
+    if not df_interp.empty and "turn_id" in df_interp.columns:
+        for t in df_interp["turn_id"].dropna().unique().tolist()[-35:]:
+            recent_options.append((f"💬 [TURN] {t}", str(t)))
+
+    seen_ids = set()
+    unique_choices: list[tuple[str, str]] = []
+    for label, tid in reversed(recent_options):
+        if tid and tid not in seen_ids:
+            seen_ids.add(tid)
+            unique_choices.append((label, tid))
+
+    label_to_id = {label: tid for label, tid in unique_choices}
+
+    selected_label = st.selectbox(
+        "Select Turn or Goal to Inspect",
+        options=[""] + [lbl for lbl, _ in unique_choices],
+        help="Select a Turn ID or Goal ID to lazily join records across all component CSVs.",
     )
 
-    custom_turn_id = st.text_input("Or enter custom Turn ID", value="")
-    inspect_id = custom_turn_id.strip() or target_turn_id
+    custom_turn_id = st.text_input("Or enter custom Turn ID / Goal ID", value="")
+    inspect_id = custom_turn_id.strip() or label_to_id.get(selected_label, "")
 
     if inspect_id:
-        with st.spinner(f"Joining telemetry records for turn {inspect_id}..."):
+        with st.spinner(f"Joining telemetry records for {inspect_id}..."):
             trace = get_turn_trace(inspect_id)
 
         if not trace:
-            st.warning(f"No records found across CSV files for turn_id: `{inspect_id}`")
+            st.warning(f"No records found across CSV files for: `{inspect_id}`")
         else:
-            st.success(f"Reconstructed trace for turn `{inspect_id}` ({len(trace)} component events)")
-            
+            st.success(f"Reconstructed trace for `{inspect_id}` ({len(trace)} component events)")
+
+            # Check if this trace represents a multi-wave goal or contains DAG execution waves
+            wave_events = [e for e in trace if e.get("component") == "dag_execution"]
+            gate_events = [e for e in trace if e.get("component") == "gate_evaluator"]
+            debug_events = [e for e in trace if e.get("component") == "pipeline_debugger"]
+            goal_events = [e for e in trace if e.get("component") == "goal_runner"]
+
+            if goal_events or len(wave_events) > 1:
+                st.markdown("### 🌊 Multi-Wave DAG Progression")
+                w_cols = st.columns(4)
+                w_cols[0].metric("Waves Executed", f"{len(wave_events)}")
+                w_cols[1].metric("Gate Decisions", f"{len(gate_events)}")
+                w_cols[2].metric("Debugger Repairs", f"{len(debug_events)}")
+                total_steps = sum(int(e.get("dag_size", 0)) for e in wave_events if str(e.get("dag_size", "")).isdigit())
+                w_cols[3].metric("Total Nodes Dispatched", f"{total_steps}")
+
+                for w_idx, w_event in enumerate(wave_events):
+                    w_turn = w_event.get("turn_id", f"Wave {w_idx+1}")
+                    w_status = w_event.get("status", "unknown")
+                    w_size = w_event.get("dag_size", "N/A")
+                    w_depth = w_event.get("dag_depth", "N/A")
+                    w_lat = w_event.get("latency_ms", "N/A")
+
+                    w_gates = [g for g in gate_events if g.get("turn_id") == w_turn]
+                    w_debugs = [d for d in debug_events if d.get("turn_id") == w_turn]
+
+                    with st.container():
+                        st.markdown(
+                            f"**Wave {w_idx+1}** (`{w_turn}`): Status: `{w_status}` • Nodes: {w_size} • Depth: {w_depth} • Latency: {w_lat} ms"
+                        )
+                        if w_gates:
+                            for g in w_gates:
+                                st.caption(f"  ↳ 🚦 Gate `{g.get('gate_id')}` evaluated `{g.get('condition')}` ➔ **Verdict: {g.get('verdict')}**")
+                        if w_debugs:
+                            for d in w_debugs:
+                                st.caption(f"  ↳ 🩺 Debugger action: `{d.get('action')}` on node `{d.get('node_id')}`")
+                    st.divider()
+
             trace_df = pd.DataFrame(trace)
-            st.dataframe(trace_df[["component", "timestamp", "status", "latency_ms"]], use_container_width=True)
+            cols_to_show = [c for c in ["component", "timestamp", "status", "latency_ms"] if c in trace_df.columns]
+            st.dataframe(trace_df[cols_to_show], use_container_width=True)
 
             for idx, event in enumerate(trace):
                 comp = event.get("component", "unknown").upper()
@@ -386,4 +459,4 @@ with tab_trace:
                 with st.expander(f"Step {idx+1}: [{comp}] Status: {status} • Latency: {latency} ms"):
                     st.json(event)
     else:
-        st.info("Select or enter a Turn ID to inspect.")
+        st.info("Select or enter a Turn ID or Goal ID to inspect.")

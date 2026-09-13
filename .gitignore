@@ -31,6 +31,7 @@ logs/
 # Metrics & Telemetry runtime data
 data/metrics/*.csv
 !data/metrics/.gitkeep
+data/scratch/
 
 # Database & SQLite runtime caches
 *.db
