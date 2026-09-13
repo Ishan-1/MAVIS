@@ -11,6 +11,7 @@ Provides:
 """
 from __future__ import annotations
 
+import json
 import re
 from graphlib import TopologicalSorter, CycleError
 from typing import Any
@@ -213,7 +214,8 @@ def validate_and_sort_dag(pipeline: list[dict]) -> tuple[list[dict] | None, str 
 def resolve_params(params: Any, node_results: dict[str, Any]) -> tuple[Any, str | None]:
     """
     Recursively resolve parameter references ($node_id, $node_id.output, $node_id.field)
-    against completed node_results.
+    against completed node_results. Supports both direct references (e.g. "$n1.output")
+    and embedded references inside strings (e.g. 'git commit -m "$n2.output"').
 
     Returns:
       (resolved_params, None) on success.
@@ -231,15 +233,46 @@ def resolve_params(params: Any, node_results: dict[str, Any]) -> tuple[Any, str 
 
             payload = node_results[dep_id]
 
-            if not field or field == "output":
-                return payload, None
+            if isinstance(payload, dict) and field and field in payload:
+                return payload[field], None
             if field == "status":
                 return 0, None
-            if isinstance(payload, dict) and field in payload:
-                return payload[field], None
+            if not field or field == "output":
+                return payload, None
             return payload, None
 
-        # Return original string if not a direct $node_id reference
+        if "$" in params:
+            err_holder: list[str] = []
+
+            def _replace_dep(match: re.Match) -> str:
+                dep_id = match.group(1)
+                field = match.group(2)
+
+                if dep_id not in node_results:
+                    err_holder.append(f"Dependency '{dep_id}' has not completed or produced a result.")
+                    return match.group(0)
+
+                payload = node_results[dep_id]
+
+                if isinstance(payload, dict) and field and field in payload:
+                    val = payload[field]
+                elif field == "status":
+                    val = 0
+                elif not field or field == "output":
+                    val = payload
+                else:
+                    val = payload
+
+                if isinstance(val, (dict, list)):
+                    return json.dumps(val)
+                return str(val)
+
+            resolved_str = DEP_SEARCH_RE.sub(_replace_dep, params)
+            if err_holder:
+                return None, err_holder[0]
+            return resolved_str, None
+
+        # Return original string if not a reference
         return params, None
 
     if isinstance(params, list):

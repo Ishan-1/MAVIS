@@ -86,6 +86,7 @@ _session_chat: list[dict[str, str]] = []
 _session_start_ts = time.time()
 _interpreter_emitter = MetricEmitter("interpreter")
 _dag_emitter = MetricEmitter("dag_execution")
+_dashboard_proc: subprocess.Popen | None = None
 
 
 def compute_dag_depth(pipeline: list[dict]) -> int:
@@ -417,40 +418,73 @@ def handle_slash_command(raw: str) -> bool:
 
     # ── /dashboard ────────────────────────────────────────────────────────────
     if verb == "/dashboard":
-        mavis_status("Launching MAVIS Local Dashboard on http://localhost:8501 ...")
+        import socket
+        import shutil
+        import webbrowser
+
+        port = 8501
+        dashboard_path = os.path.join(_MAV_ROOT, "scripts", "dashboard.py")
+
+        def _is_port_open(p: int) -> bool:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.5)
+                    return s.connect_ex(("127.0.0.1", p)) == 0
+            except Exception:
+                return False
+
+        def _safe_open_browser(url: str) -> None:
+            try:
+                with open(os.devnull, "wb") as null_f:
+                    old_out = os.dup(1)
+                    old_err = os.dup(2)
+                    try:
+                        os.dup2(null_f.fileno(), 1)
+                        os.dup2(null_f.fileno(), 2)
+                        webbrowser.open(url)
+                    finally:
+                        os.dup2(old_out, 1)
+                        os.dup2(old_err, 2)
+                        os.close(old_out)
+                        os.close(old_err)
+            except Exception:
+                pass
+
+        if _is_port_open(port):
+            mavis_ok(f"Dashboard is already running at [bold cyan]http://localhost:{port}[/bold cyan]")
+            _safe_open_browser(f"http://localhost:{port}")
+            return True
+
+        mavis_status(f"Launching MAVIS Local Dashboard on http://localhost:{port} ...")
         try:
-            import shutil
-            import webbrowser
-            dashboard_path = os.path.join(_MAV_ROOT, "scripts", "dashboard.py")
-            
             # Find streamlit binary: check local venv first, then PATH, then sys.executable
             venv_streamlit = os.path.join(_MAV_ROOT, "bin", "streamlit")
             venv_python = os.path.join(_MAV_ROOT, "bin", "python")
-            
-            if os.path.exists(venv_streamlit):
-                cmd = [venv_streamlit, "run", dashboard_path, "--server.headless", "true", "--server.port", "8501"]
-            elif os.path.exists(venv_python):
-                cmd = [venv_python, "-m", "streamlit", "run", dashboard_path, "--server.headless", "true", "--server.port", "8501"]
-            elif shutil.which("streamlit"):
-                cmd = [shutil.which("streamlit"), "run", dashboard_path, "--server.headless", "true", "--server.port", "8501"]
-            else:
-                cmd = [sys.executable, "-m", "streamlit", "run", dashboard_path, "--server.headless", "true", "--server.port", "8501"]
 
-            proc = subprocess.Popen(
+            if os.path.exists(venv_streamlit):
+                cmd = [venv_streamlit, "run", dashboard_path, "--server.headless", "true", "--server.port", str(port)]
+            elif os.path.exists(venv_python):
+                cmd = [venv_python, "-m", "streamlit", "run", dashboard_path, "--server.headless", "true", "--server.port", str(port)]
+            elif shutil.which("streamlit"):
+                cmd = [shutil.which("streamlit"), "run", dashboard_path, "--server.headless", "true", "--server.port", str(port)]
+            else:
+                cmd = [sys.executable, "-m", "streamlit", "run", dashboard_path, "--server.headless", "true", "--server.port", str(port)]
+
+            global _dashboard_proc
+            _dashboard_proc = subprocess.Popen(
                 cmd,
                 cwd=_MAV_ROOT,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
-            time.sleep(1.0)
-            if proc.poll() is not None:
-                mavis_error(f"Dashboard process exited immediately with code {proc.returncode}. Try running: ./bin/streamlit run scripts/dashboard.py")
+            time.sleep(1.5)
+            if _dashboard_proc.poll() is not None:
+                mavis_error(f"Dashboard process exited immediately with code {_dashboard_proc.returncode}.")
             else:
-                mavis_ok(f"Dashboard running at [bold cyan]http://localhost:8501[/bold cyan] (PID {proc.pid})")
-                try:
-                    webbrowser.open("http://localhost:8501")
-                except Exception:
-                    pass
+                mavis_ok(f"Dashboard running at [bold cyan]http://localhost:{port}[/bold cyan] (PID {_dashboard_proc.pid})")
+                _safe_open_browser(f"http://localhost:{port}")
         except Exception as e:
             mavis_error(f"Could not launch dashboard: {e}")
         return True
@@ -1004,6 +1038,9 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
                             status, result = agent.run(turn_id=turn_id, **resolved_params)
                     elif mcp_manager.is_mcp_tool(current_command):
                         status, result = mcp_manager.call_tool(current_command, resolved_params)
+                    elif current_command == "run_shell_command" and isinstance(resolved_params, dict) and "streamlit run" in str(resolved_params.get("command", "")):
+                        handle_slash_command("/dashboard")
+                        status, result = 0, "Dashboard launched in background at http://localhost:8501"
                     else:
                         status, result = call_command(current_command, resolved_params)
 
@@ -1137,6 +1174,25 @@ def interpret_command(command: str) -> bool:
     # ── Slash command check ────────────────────────────────────────────────────
     if handle_slash_command(command):
         return True
+
+    # ── Natural language dashboard request check ───────────────────────────────
+    cleaned_cmd = command.strip().lower()
+    if cleaned_cmd in (
+        "dashboard",
+        "run dashboard",
+        "start dashboard",
+        "launch dashboard",
+        "open dashboard",
+        "show dashboard",
+        "view dashboard",
+        "open the dashboard",
+        "launch the dashboard",
+        "start the dashboard",
+        "run the dashboard",
+        "show the dashboard",
+        "view the dashboard",
+    ):
+        return handle_slash_command("/dashboard")
 
     turn_id = uuid.uuid4().hex[:8]
     _session_chat.append({
@@ -1548,6 +1604,15 @@ if __name__ == "__main__":
             import traceback
             traceback.print_exc()
     finally:
+        try:
+            if _dashboard_proc and _dashboard_proc.poll() is None:
+                _dashboard_proc.terminate()
+                try:
+                    _dashboard_proc.wait(timeout=2)
+                except Exception:
+                    _dashboard_proc.kill()
+        except BaseException:
+            pass
         try:
             _stop_workers()
         except BaseException:
