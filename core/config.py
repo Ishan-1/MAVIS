@@ -113,6 +113,20 @@ _DEFAULTS: dict = {
         "vertexai": True,
         "base_url": None,
     },
+    "mcp": {
+        "enabled": True,
+        "timeout_seconds": 30,
+        "servers": {},
+    },
+    "neo4j": {
+        "enabled": True,
+        "uri": os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+        "user": os.getenv("NEO4J_USER", "neo4j"),
+        "password": os.getenv("NEO4J_PASSWORD", "password"),
+        "database": os.getenv("NEO4J_DATABASE", "neo4j"),
+        "vector_dimensions": 768,
+        "similarity_threshold": 0.85,
+    },
 }
 
 
@@ -175,10 +189,20 @@ class MAVISConfig:
     def llm(self) -> dict:
         return self._data.setdefault("llm", dict(_DEFAULTS["llm"]))
 
+    @property
+    def mcp(self) -> dict:
+        return self._data.setdefault("mcp", dict(_DEFAULTS["mcp"]))
+
+    @property
+    def neo4j(self) -> dict:
+        return self._data.setdefault("neo4j", dict(_DEFAULTS["neo4j"]))
+
     # ── Generic get / set ─────────────────────────────────────────────────────
 
-    def get(self, section: str, key: str, default: Any = None) -> Any:
-        """Safe read: cfg.get('memory', 'top_k', default=5)."""
+    def get(self, section: str, key: str | None = None, default: Any = None) -> Any:
+        """Safe read: cfg.get('memory', 'top_k', default=5) or cfg.get('mcp')."""
+        if key is None:
+            return self._data.get(section, default if default is not None else {})
         return self._data.get(section, {}).get(key, default)
 
     def set(self, section: str, key: str, value: Any) -> None:

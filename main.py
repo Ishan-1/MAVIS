@@ -51,6 +51,17 @@ commands_list = {}
 with open("data/commands_list.json", "r") as file:
     commands_list = json.load(file)
 
+# Initialize MCP servers and merge discovered tools
+from core.mcp_client import mcp_manager
+try:
+    mcp_manager.initialize_from_config()
+    mcp_tools = mcp_manager.mavis_commands
+    commands_list.update(mcp_tools)
+    if mcp_tools:
+        tool_retriever.sync_tools(mcp_tools)
+except Exception as _mcp_init_err:
+    print(f"[MCP] Warning: Initialization error: {_mcp_init_err}")
+
 agents_list = {}
 if os.path.exists("data/agents_list.json"):
     try:
@@ -95,6 +106,7 @@ _SLASH_SUBCOMMANDS = {
     "/status": [],
     "/metrics": [],
     "/dashboard": [],
+    "/mcp": ["status", "list", "reload"],
 }
 
 _COMMAND_METAS = {
@@ -109,6 +121,7 @@ _COMMAND_METAS = {
     "/block": "Add command to ONI blacklist",
     "/greylist": "Add command to ONI greylist",
     "/unlist": "Remove command from all ONI lists",
+    "/mcp": "Inspect or manage MCP servers and tools",
 }
 
 _SUBCOMMAND_METAS = {
@@ -122,6 +135,11 @@ _SUBCOMMAND_METAS = {
         "ask": "Prompt on greylisted commands (default)",
         "yolo": "Allow all commands without prompting",
         "whitelist": "Deny all unlisted commands",
+    },
+    "/mcp": {
+        "status": "View connected MCP servers and tool counts",
+        "list": "List all active tools discovered from MCP servers",
+        "reload": "Reconnect MCP servers and rediscover tools",
     },
 }
 
@@ -236,6 +254,7 @@ _HELP_ROWS = [
     ("/block <cmd>",             "Add to ONI blacklist."),
     ("/greylist <cmd>",          "Add to ONI greylist."),
     ("/unlist <cmd>",            "Remove from all ONI lists."),
+    ("/mcp [status|list|reload]","Inspect, list, or reload MCP servers and tools."),
 ]
 
 
@@ -474,6 +493,48 @@ def handle_slash_command(raw: str) -> bool:
             _oni_list_add(target_list, command)
             mavis_ok(f"'{command}' → {target_list}.")
 
+        return True
+
+    # ── /mcp [status|list|reload] ─────────────────────────────────────────────
+    if verb == "/mcp":
+        sub = parts[1].lower() if len(parts) > 1 else "status"
+        if sub == "status":
+            summaries = mcp_manager.get_status_summary()
+            rule("MCP Servers Status")
+            if not summaries:
+                mavis_print("  [dim]No MCP servers configured or active.[/dim]")
+            else:
+                rows = []
+                for s in summaries:
+                    status_str = "[green]connected[/green]" if s["connected"] else "[red]offline[/red]"
+                    rows.append((s["server"], f"{status_str} ({s['tool_count']} tools) — {s['command']}"))
+                print_table(rows, title="Configured MCP Servers")
+            rule()
+        elif sub == "list":
+            rule("Discovered MCP Tools")
+            if not mcp_manager.mavis_commands:
+                mavis_print("  [dim]No MCP tools currently available.[/dim]")
+            else:
+                rows = []
+                for sig, meta in mcp_manager.mavis_commands.items():
+                    rows.append((sig, meta.get("description", "")))
+                print_table(rows, title="Active MCP Tools")
+            rule()
+        elif sub == "reload":
+            mavis_status("Reloading MCP servers and rediscovering tools...")
+            mcp_manager.shutdown()
+            mcp_manager.initialize_from_config()
+            # Remove old MCP tools from commands_list
+            for k in list(commands_list.keys()):
+                if isinstance(commands_list[k], dict) and commands_list[k].get("is_mcp"):
+                    del commands_list[k]
+            new_tools = mcp_manager.mavis_commands
+            commands_list.update(new_tools)
+            if new_tools:
+                tool_retriever.sync_tools(new_tools)
+            mavis_ok(f"MCP reloaded: {len(new_tools)} tool(s) available across {len(mcp_manager.servers)} server(s).")
+        else:
+            mavis_error(f"Unknown /mcp subcommand '{sub}'. Use /mcp [status | list | reload].")
         return True
 
     # Not a recognised slash command — pass through to LLM
@@ -863,6 +924,8 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
                     })
                     return
                 status, result = agent.run(turn_id=turn_id, **resolved_params)
+            elif mcp_manager.is_mcp_tool(command_name):
+                status, result = mcp_manager.call_tool(command_name, resolved_params)
             else:
                 status, result = call_command(command_name, resolved_params)
 
@@ -1389,6 +1452,10 @@ if __name__ == "__main__":
             pass
         try:
             runner.stop()
+        except BaseException:
+            pass
+        try:
+            mcp_manager.shutdown()
         except BaseException:
             pass
         try:

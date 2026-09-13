@@ -1,6 +1,6 @@
 """
 core/tool_retriever.py
-Dynamic tool categorization and semantic retrieval for MAVIS.
+Dynamic tool categorization and semantic retrieval for MAVIS using SQLite and cosine similarity.
 Classifies tools into three discrete classes:
 - "generalizable": universal primitives (always included in prompt)
 - "repurposable": domain-adaptable tools (retrieved via semantic search)
@@ -9,16 +9,18 @@ Classifies tools into three discrete classes:
 from __future__ import annotations
 
 import os
-import chromadb
-from chromadb.config import Settings
+import json
+import sqlite3
+from typing import Any
+
 from core.config import cfg
 from core.helpers import log_it
 from core.llm import get_llm_client, BaseLLMClient
-from memories.embedding import embed
+from memories.embedding import embed, cosine_similarity
 
 _ENTITY = "tool_retriever"
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_CHROMA_PATH = os.path.join(_BASE_DIR, "data", "tools_chroma")
+_DEFAULT_DB_PATH = os.path.join(_BASE_DIR, "data", "tools_registry.db")
 
 VALID_GENERALIZABILITY_CLASSES = ("specialized", "repurposable", "generalizable")
 
@@ -57,47 +59,67 @@ def normalize_generalizability_class(val: any) -> str:
 
 class ToolRetriever:
     """
-    Indexes available tools into ChromaDB with discrete generalizability classes.
+    Indexes available tools into SQLite with discrete generalizability classes.
     Supplies ALL 'generalizable' tools + top-K domain tools ('repurposable' + 'specialized').
     """
 
-    def __init__(self, client: BaseLLMClient | None = None, chroma_path: str = _CHROMA_PATH):
+    def __init__(self, client: BaseLLMClient | None = None, chroma_path: str | None = None, db_path: str | None = None):
         self._client = client or get_llm_client()
-        os.makedirs(chroma_path, exist_ok=True)
-        self._chroma = chromadb.PersistentClient(
-            path=chroma_path,
-            settings=Settings(anonymized_telemetry=False),
-        )
-        self._col = self._chroma.get_or_create_collection(
-            name="tools_registry",
-            metadata={"hnsw:space": "cosine"},
-        )
+        target = db_path or chroma_path or _DEFAULT_DB_PATH
+        if os.path.isdir(target) or not target.endswith(".db"):
+            os.makedirs(target, exist_ok=True)
+            self.db_path = os.path.join(target, "tools_registry.db")
+        else:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            self.db_path = target
+
+        self._init_db()
         self._generalizability_cache: dict[str, str] = dict(_DEFAULT_GENERALIZABILITY)
         self._load_cached_metadata()
+
+    def _init_db(self):
+        """Create tools_registry table if not exists."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS tools_registry (
+                        func_name TEXT PRIMARY KEY,
+                        key TEXT NOT NULL,
+                        description TEXT,
+                        generalizability TEXT NOT NULL,
+                        embedding TEXT NOT NULL
+                    )
+                """)
+                conn.commit()
+        except Exception as exc:
+            log_it(f"Failed to initialize SQLite tool registry: {exc}", _ENTITY)
 
     def _tool_id(self, key: str) -> str:
         return key.split("(")[0].strip()
 
     def _load_cached_metadata(self):
-        """Pre-populate in-memory generalizability scores from Chroma collection."""
+        """Pre-populate in-memory generalizability scores from SQLite database."""
         try:
-            items = self._col.get(include=["metadatas"])
-            if items and items.get("metadatas"):
-                for meta in items["metadatas"]:
-                    if meta and "func_name" in meta and "generalizability" in meta:
-                        self._generalizability_cache[meta["func_name"]] = normalize_generalizability_class(
-                            meta["generalizability"]
-                        )
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT func_name, generalizability FROM tools_registry")
+                for func_name, gen_class in cursor.fetchall():
+                    self._generalizability_cache[func_name] = normalize_generalizability_class(gen_class)
         except Exception as exc:
-            log_it(f"Failed loading tool metadata from Chroma: {exc}", _ENTITY)
+            log_it(f"Failed loading tool metadata from SQLite: {exc}", _ENTITY)
 
     def sync_tools(self, commands_dict: dict[str, any]):
-        """Index any missing tools into the Chroma collection."""
+        """Index any missing tools into the SQLite collection."""
         if not commands_dict:
             return
 
         try:
-            existing_ids = set(self._col.get(include=[])["ids"])
+            existing_ids = set()
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT func_name FROM tools_registry")
+                existing_ids = {row[0] for row in cursor.fetchall()}
+
             for key, val in commands_dict.items():
                 tool_id = self._tool_id(key)
                 if isinstance(val, dict):
@@ -132,25 +154,25 @@ class ToolRetriever:
             gen_class = normalize_generalizability_class(generalizability)
 
         self._generalizability_cache[tool_id] = gen_class
-
         doc_text = f"Tool: {tool_id}\nSignature: {key}\nDescription: {desc_text}"
+
         try:
             vector = embed(doc_text, self._client)
-            self._col.upsert(
-                ids=[tool_id],
-                embeddings=[vector],
-                documents=[doc_text],
-                metadatas=[{
-                    "func_name": tool_id,
-                    "key": key,
-                    "description": desc_text,
-                    "generalizability": gen_class,
-                }],
-            )
-            log_it(
-                f"Indexed tool '{tool_id}' (class={gen_class})",
-                _ENTITY,
-            )
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO tools_registry (
+                        func_name, key, description, generalizability, embedding
+                    ) VALUES (?, ?, ?, ?, ?)
+                """, (
+                    tool_id,
+                    key,
+                    desc_text,
+                    gen_class,
+                    json.dumps(vector),
+                ))
+                conn.commit()
+
+            log_it(f"Indexed tool '{tool_id}' (class={gen_class})", _ENTITY)
         except Exception as exc:
             log_it(f"Failed to index tool '{tool_id}': {exc}", _ENTITY)
 
@@ -178,7 +200,7 @@ class ToolRetriever:
         if len(commands_dict) <= thresh:
             return commands_dict
 
-        # Sync before querying to ensure all tools exist in Chroma
+        # Sync before querying to ensure all tools exist in database
         self.sync_tools(commands_dict)
 
         k = (
@@ -202,28 +224,32 @@ class ToolRetriever:
             else:
                 domain_tools[key] = val
 
-        # If there are no domain tools or few tools, return general + domain
+        # If there are no domain tools, return general
         if not domain_tools:
             return general_tools
 
         try:
             query_vec = embed(query, self._client)
-            results = self._col.query(
-                query_embeddings=[query_vec],
-                n_results=min(k + len(general_tools), len(commands_dict)),
-                include=["metadatas"],
-            )
 
-            matched_domain_keys: list[str] = []
-            if results and results.get("metadatas"):
-                for meta_list in results["metadatas"]:
-                    for meta in meta_list:
-                        if meta and "key" in meta:
-                            k_name = meta["key"]
-                            if k_name in domain_tools and k_name not in matched_domain_keys:
-                                matched_domain_keys.append(k_name)
-                                if len(matched_domain_keys) >= k:
-                                    break
+            # Load domain tool vectors from SQLite
+            rows = []
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT func_name, key, embedding FROM tools_registry")
+                rows = cursor.fetchall()
+
+            scored = []
+            for func_name, key_name, emb_json in rows:
+                if key_name in domain_tools:
+                    try:
+                        tool_vec = json.loads(emb_json)
+                        sim = cosine_similarity(query_vec, tool_vec)
+                        scored.append((sim, key_name))
+                    except Exception:
+                        continue
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+            matched_domain_keys = [k_name for _, k_name in scored[:k]]
 
             combined = dict(general_tools)
             for k_name in matched_domain_keys:

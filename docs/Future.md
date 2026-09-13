@@ -1,2 +1,4 @@
 ## Future Work
-- Adding observability for performance metrics for MAVIS in 2 ways: a small add-on to the CLI that shows the main stats and a dedicated locally hosted dashboard for a detailed view.
+- **Context-Aware Semantic Caching**:
+  - Resolve anaphora and deictic references (e.g. queries like *"Repeat this again"*, *"do that with python"*, *"retry"*).
+  - Raw isolated queries containing deictic terms must either bypass semantic caching or be expanded against prior conversation context (e.g. incorporating previous turn's tool execution state/signature into the composite cache key) to prevent catastrophic false-positive cache hits across unrelated conversational sessions.

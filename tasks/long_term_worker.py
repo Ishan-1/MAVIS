@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from core.config import cfg
 from core.helpers import log_it
 from memories.emotion_classifier import should_promote_long_term
+from memories.knowledge_extractor import extract_facts_from_turn
 
 _ENTITY = "long_term_worker"
 
@@ -80,6 +81,7 @@ def run():
                 continue  # already processed
 
             latest_ts = max(latest_ts, ts)
+            content = entry.get("content", "")
             directive = entry.get("directive", entry.get("intent_strength", 0.0) > 0.85)
 
             promote, ltype = should_promote_long_term(directive, content)
@@ -101,6 +103,21 @@ def run():
                     f"type={ltype!r} from {fname}",
                     _ENTITY,
                 )
+
+                # Background Knowledge Graph extraction for Neo4j
+                if _store.kg and _store.kg.is_available() and getattr(_store, "_client", None):
+                    try:
+                        extracted_facts = extract_facts_from_turn(content, _store._client)
+                        for fact in extracted_facts:
+                            _store.add_fact(
+                                subject=fact["subject"],
+                                predicate=fact["predicate"],
+                                obj=fact["object"],
+                                topic=fact.get("topic", _store.write_topic),
+                                is_functional=fact.get("is_functional", True),
+                            )
+                    except Exception as ke_err:
+                        log_it(f"long_term_worker: knowledge extraction failed: {ke_err}", _ENTITY)
 
     # Advance cursor
     _store.write_cursor(_store.lt_cursor_path, latest_ts)

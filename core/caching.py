@@ -1,43 +1,59 @@
 """
 core/caching.py
-Semantic cache management for MAVIS DAG pipelines and execution results.
+Semantic cache management for MAVIS DAG pipelines and execution results using SQLite.
 """
 from __future__ import annotations
 
 import os
 import json
 import time
+import sqlite3
 from typing import Any
-import chromadb
-from chromadb.config import Settings
+
 from core.helpers import log_it
 from core.llm import get_llm_client, BaseLLMClient
-from memories.embedding import embed
+from memories.embedding import embed, cosine_similarity
 from core.config import cfg
 from core.metrics import MetricEmitter
 
 _ENTITY = "caching"
 _EMITTER = MetricEmitter("caching")
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_CHROMA_PATH = os.path.join(_BASE_DIR, "data", "pipeline_cache_chroma")
+_DB_PATH = os.path.join(_BASE_DIR, "data", "pipeline_cache.db")
 
 
 class CacheManager:
     """
-    Manages semantic caching of DAG pipelines and results using ChromaDB.
+    Manages semantic caching of DAG pipelines and results using a fast SQLite store.
     """
-    def __init__(self, client: BaseLLMClient | None = None, chroma_path: str = _CHROMA_PATH):
+    def __init__(self, client: BaseLLMClient | None = None, db_path: str = _DB_PATH):
         self._client = client or get_llm_client()
-        os.makedirs(chroma_path, exist_ok=True)
-        self._chroma = chromadb.PersistentClient(
-            path=chroma_path,
-            settings=Settings(anonymized_telemetry=False),
-        )
-        self._col = self._chroma.get_or_create_collection(
-            name="pipeline_cache",
-            metadata={"hnsw:space": "cosine"},
-        )
-    
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self._init_db()
+
+    def _init_db(self):
+        """Create sqlite tables if not exists."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS pipeline_cache (
+                        id TEXT PRIMARY KEY,
+                        query TEXT NOT NULL,
+                        pipeline TEXT NOT NULL,
+                        result TEXT,
+                        embedding TEXT NOT NULL,
+                        ttl_timestamp INTEGER NOT NULL,
+                        generalizability TEXT NOT NULL,
+                        inserted_at INTEGER NOT NULL
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_ttl ON pipeline_cache(ttl_timestamp)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_inserted ON pipeline_cache(inserted_at)")
+                conn.commit()
+        except Exception as exc:
+            log_it(f"Failed to initialize SQLite pipeline cache: {exc}", _ENTITY)
+
     def _verify_cache_with_llm(self, new_query: str, cached_query: str, pipeline_str: str, ttl_valid: bool) -> bool:
         """Use LLM to verify if a cache hit between 0.85 and 0.95 is valid."""
         prompt = (
@@ -72,20 +88,25 @@ class CacheManager:
 
     def check_cache(self, query: str, turn_id: str = "") -> dict | None:
         """
-        Check if the query matches a cached entry.
+        Check if the query matches a cached entry via vector similarity.
         Returns dict with 'pipeline' (and optionally 'result') if cache hit, else None.
         Emits observability metrics to data/metrics/caching.csv.
         """
         t0 = time.perf_counter()
         try:
             query_vec = embed(query, self._client)
-            results = self._col.query(
-                query_embeddings=[query_vec],
-                n_results=3,
-                include=["metadatas", "distances"]
-            )
-            
-            if not results or not results.get("metadatas") or not results["metadatas"][0]:
+
+            # Retrieve cached candidate vectors
+            rows = []
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, query, pipeline, result, embedding, ttl_timestamp, generalizability, inserted_at
+                    FROM pipeline_cache
+                """)
+                rows = cursor.fetchall()
+
+            if not rows:
                 latency_ms = round((time.perf_counter() - t0) * 1000, 2)
                 _EMITTER.log({
                     "turn_id": turn_id,
@@ -98,30 +119,41 @@ class CacheManager:
                     "tokens_saved_estimate": 0,
                 })
                 return None
-                
-            distances = results["distances"][0]
-            metadatas = results["metadatas"][0]
-            
-            for i, distance in enumerate(distances):
-                similarity = 1.0 - distance
-                meta = metadatas[i]
-                cached_query = meta.get("query", "")
-                
-                pipeline = json.loads(meta.get("pipeline", "[]"))
-                result = json.loads(meta.get("result", "null"))
-                ttl_timestamp = meta.get("ttl_timestamp", 0)
-                generalizability = meta.get("generalizability", "specialized")
-                
+
+            # Calculate cosine similarities
+            scored_candidates = []
+            for row in rows:
+                row_id, q_text, pipe_str, res_str, emb_json, ttl_ts, gen_class, ins_at = row
+                try:
+                    c_vec = json.loads(emb_json)
+                    sim = cosine_similarity(query_vec, c_vec)
+                    scored_candidates.append((sim, row))
+                except Exception:
+                    continue
+
+            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+
+            for similarity, row in scored_candidates[:3]:
+                row_id, cached_query, pipe_str, res_str, emb_json, ttl_timestamp, generalizability, ins_at = row
+                try:
+                    pipeline = json.loads(pipe_str)
+                except Exception:
+                    pipeline = []
+                try:
+                    result = json.loads(res_str) if res_str else None
+                except Exception:
+                    result = res_str
+
                 ttl_valid = time.time() < ttl_timestamp
                 llm_verify_result = "n/a"
-                
+
                 if similarity > 0.95:
                     hit_tier = "instant"
                 elif similarity >= 0.85:
-                    verified = self._verify_cache_with_llm(query, cached_query, json.dumps(pipeline), ttl_valid)
+                    verified = self._verify_cache_with_llm(query, cached_query, pipe_str, ttl_valid)
                     llm_verify_result = "verified" if verified else "rejected"
                     if not verified:
-                        continue # Try next result
+                        continue
                     hit_tier = "llm_verified"
                 else:
                     latency_ms = round((time.perf_counter() - t0) * 1000, 2)
@@ -136,16 +168,16 @@ class CacheManager:
                         "tokens_saved_estimate": 0,
                     })
                     return None
-                
+
                 # Cache Hit Confirmed
                 final_pipeline = pipeline
                 if generalizability == "generalized" and similarity < 1.0:
                     final_pipeline = self._extract_parameters(query, cached_query, pipeline)
-                
-                ttl_seconds = max(0, ttl_timestamp - meta.get("inserted_at", int(time.time())))
+
+                ttl_seconds = max(0, ttl_timestamp - ins_at)
                 latency_ms = round((time.perf_counter() - t0) * 1000, 2)
                 tokens_saved = 800 if (ttl_valid and result is not None) else 350
-                
+
                 _EMITTER.log({
                     "turn_id": turn_id,
                     "cache_status": "hit",
@@ -156,14 +188,14 @@ class CacheManager:
                     "latency_ms": latency_ms,
                     "tokens_saved_estimate": tokens_saved,
                 })
-                
+
                 if ttl_valid and result is not None:
                     log_it(f"Full Cache Hit for '{query}' (similarity: {similarity:.2f})", _ENTITY)
                     return {"pipeline": final_pipeline, "result": result, "ttl_valid": True, "ttl": ttl_seconds, "generalizability": generalizability}
                 else:
                     log_it(f"Pipeline Cache Hit for '{query}' (similarity: {similarity:.2f}), result expired", _ENTITY)
                     return {"pipeline": final_pipeline, "result": None, "ttl_valid": False, "ttl": ttl_seconds, "generalizability": generalizability}
-                    
+
             latency_ms = round((time.perf_counter() - t0) * 1000, 2)
             _EMITTER.log({
                 "turn_id": turn_id,
@@ -176,7 +208,7 @@ class CacheManager:
                 "tokens_saved_estimate": 0,
             })
             return None
-            
+
         except Exception as e:
             log_it(f"Cache check failed: {e}", _ENTITY)
             latency_ms = round((time.perf_counter() - t0) * 1000, 2)
@@ -193,78 +225,71 @@ class CacheManager:
             return None
 
     def save_cache(self, query: str, pipeline: list[dict], result: Any, ttl_seconds: int = 300, generalizability: str = "specialized"):
-        """Save a pipeline and its execution result to the cache."""
+        """Save a pipeline and its execution result to SQLite cache."""
         try:
             doc_id = str(hash(query))
             query_vec = embed(query, self._client)
-            ttl_timestamp = int(time.time() + ttl_seconds)
-            
-            # Serialize result cleanly
+            now = int(time.time())
+            ttl_timestamp = now + ttl_seconds
+
             try:
                 serialized_result = json.dumps(result)
             except Exception:
                 serialized_result = json.dumps(str(result))
-                
-            self._col.upsert(
-                ids=[doc_id],
-                embeddings=[query_vec],
-                documents=[query],
-                metadatas=[{
-                    "query": query,
-                    "pipeline": json.dumps(pipeline),
-                    "result": serialized_result,
-                    "ttl_timestamp": ttl_timestamp,
-                    "generalizability": generalizability,
-                    "inserted_at": int(time.time())
-                }],
-            )
+
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO pipeline_cache (
+                        id, query, pipeline, result, embedding, ttl_timestamp, generalizability, inserted_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    doc_id,
+                    query,
+                    json.dumps(pipeline),
+                    serialized_result,
+                    json.dumps(query_vec),
+                    ttl_timestamp,
+                    generalizability,
+                    now,
+                ))
+                conn.commit()
+
             log_it(f"Cached pipeline and result for '{query}' (TTL: {ttl_seconds}s, Gen: {generalizability})", _ENTITY)
         except Exception as e:
             log_it(f"Failed to save cache: {e}", _ENTITY)
-            
+
     def evict_expired(self):
         """Remove only the *result* payload from entries where TTL has expired, preserving the pipeline."""
         try:
-            current_time = time.time()
-            all_data = self._col.get(include=["metadatas"])
-            if not all_data or not all_data.get("ids"):
-                return
-                
-            for doc_id, meta in zip(all_data["ids"], all_data["metadatas"]):
-                ttl_timestamp = meta.get("ttl_timestamp", 0)
-                result = meta.get("result", "null")
-                if current_time > ttl_timestamp and result != "null":
-                    # Evict result but keep pipeline
-                    meta["result"] = "null"
-                    self._col.update(
-                        ids=[doc_id],
-                        metadatas=[meta]
-                    )
+            now = int(time.time())
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    UPDATE pipeline_cache SET result = 'null' WHERE ? > ttl_timestamp AND result != 'null'
+                """, (now,))
+                conn.commit()
             log_it("Expired cache results evicted.", _ENTITY)
         except Exception as e:
             log_it(f"Failed to evict expired cache: {e}", _ENTITY)
-            
+
     def lru_evict(self, limit: int = 1000):
         """Evict oldest full entries if collection size exceeds limit."""
         try:
-            count = self._col.count()
-            if count <= limit:
-                return
-                
-            all_data = self._col.get(include=["metadatas"])
-            items = []
-            for doc_id, meta in zip(all_data["ids"], all_data["metadatas"]):
-                items.append((doc_id, meta.get("inserted_at", 0)))
-                
-            items.sort(key=lambda x: x[1]) # Sort by inserted_at ascending (oldest first)
-            
-            to_delete = count - limit
-            delete_ids = [item[0] for item in items[:to_delete]]
-            
-            self._col.delete(ids=delete_ids)
-            log_it(f"LRU Evicted {len(delete_ids)} oldest cache entries.", _ENTITY)
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM pipeline_cache")
+                count = cursor.fetchone()[0]
+                if count > limit:
+                    to_delete = count - limit
+                    cursor.execute("""
+                        DELETE FROM pipeline_cache WHERE id IN (
+                            SELECT id FROM pipeline_cache ORDER BY inserted_at ASC LIMIT ?
+                        )
+                    """, (to_delete,))
+                    conn.commit()
+                    log_it(f"LRU Evicted {to_delete} oldest cache entries.", _ENTITY)
         except Exception as e:
             log_it(f"Failed LRU eviction: {e}", _ENTITY)
+
 
 # Global singleton
 cache_manager = CacheManager()

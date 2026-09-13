@@ -3,8 +3,8 @@ python-dotenv
 requests
 parsedatetime
 schedule
-chromadb==1.5.9
 rich
 prompt_toolkit
 pandas
 streamlit
+neo4j>=5.0.0

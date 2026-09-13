@@ -95,5 +95,19 @@
         "tick_seconds": 30,
         "short_term_worker_interval_minutes": 15,
         "long_term_worker_interval_minutes": 480
+    },
+    "mcp": {
+        "enabled": true,
+        "timeout_seconds": 30,
+        "servers": {
+            "brave-search": {
+                "enabled": false,
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+                "env": {
+                    "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+                }
+            }
+        }
     }
 }

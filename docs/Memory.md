@@ -95,9 +95,9 @@ On every command, before calling the LLM, context is assembled as:
 [Current user input]
 ```
 
-Retrieval for both short-term and long-term uses **ChromaDB** (vector similarity search). The current user input is embedded at query time and the top-K most similar memories are retrieved from each tier's collection. Top-K = 5 per tier (tunable).
+Retrieval for long-term memory uses **Neo4j Knowledge Graph** (hybrid vector similarity + Cypher graph traversal), while short-term retrieval queries the rolling 7-day JSON files via vector similarity. The current user input is embedded at query time and the top-K most similar memories are retrieved from each tier. Top-K = 5 per tier (tunable).
 
-Short-term retrieval is scoped to the last 7 days using ChromaDB metadata filtering on the `date` field. Entries older than 7 days are deleted from the collection and their JSON files are archived/removed.
+Short-term retrieval is scoped to the last 7 days using date filtering on the daily JSON files. Entries older than 7 days are archived/removed by background workers.
 
 ---
 
@@ -105,24 +105,23 @@ Short-term retrieval is scoped to the last 7 days using ChromaDB metadata filter
 
 ```
 memories/
-├── short_term/
-│   ├── chroma/              ← ChromaDB collection (embeddings + metadata)
-│   └── json/
-│       ├── 2026-08-20.json  ← deleted after 7 days (human-readable reference)
-│       ├── 2026-08-25.json
-│       └── 2026-08-26.json  ← today
-└── long_term/
-    ├── chroma/              ← ChromaDB collection (embeddings + metadata)
-    └── json/
-        ├── behaviours.json  ← permanent behaviour rules
-        └── facts.json       ← things explicitly remembered long-term
+├── interpreter/
+│   ├── short_term/
+│   │   └── json/
+│   │       ├── 2026-08-20.json  ← deleted after 7 days (human-readable reference)
+│   │       ├── 2026-08-25.json
+│   │       └── 2026-08-26.json  ← today
+│   └── long_term/
+│       └── json/
+│           ├── behaviours.json  ← permanent behaviour rules
+│           └── facts.json       ← things explicitly remembered long-term
 ```
 
-Every write goes to **both** the ChromaDB collection (for retrieval) and the corresponding JSON file (human-readable reference and recovery). ChromaDB is the source of truth for retrieval; JSON is the source of truth for inspection and debugging.
+Long-term facts and relationships are stored in **Neo4j** with topic-subscription boundaries, and written to JSON files for human inspection.
 
 ---
 
-- ~~Vector DB vs. flat JSON~~ → **Resolved**: ChromaDB for both tiers; JSON written in parallel as human-readable reference and recovery backup.
+- ~~Vector DB vs. flat JSON~~ → **Resolved**: Neo4j for relational knowledge & hybrid vector search; JSON written in parallel as human-readable reference and recovery backup.
 - ~~Compaction latency~~ → **Resolved**: inline compaction is an acceptable tradeoff. Compaction should be rare in practice given the large token cap.
 - ~~Cross-session working memory persistence~~ → **Resolved**: not needed. Working memory is session-only; short-term memory captures what matters.
 
@@ -274,3 +273,34 @@ debugger_mem.write_long_term(fix_entry, ltype="fix")
 ---
 
 - ~~Scoped subagent memory~~ → **Resolved**: namespaced `MemoryStore` instances; cross-read own-write between ToolBuilder and Debugger; Interpreter fully isolated.
+
+---
+
+### Topic-Subscribed Neo4j Knowledge Graph
+
+MAVIS integrates **Neo4j** as its central property-graph and vector memory backend, resolving temporal contradictions and structuring relational knowledge across subagents.
+
+#### 1. Topic Hierarchy & Boundary Matrix
+
+Facts and entity relationships are tagged with hierarchical topics:
+
+| Component / Subagent | Subscribed Read Topics | Write Topic | User Personal Data Access |
+|---|---|---|:---:|
+| **Interpreter** | `["user.*", "env.*", "tooling.*", "agents.*"]` | `user.profile` | Full Access |
+| **ToolBuilder** | `["env.*", "tooling.*", "debugging.*"]` | `tooling.tools` | ❌ **Hard Blocked** |
+| **ToolDebugger** | `["env.*", "tooling.*", "debugging.*"]` | `debugging.fixes` | ❌ **Hard Blocked** |
+| **AgentBuilder / AgentDebugger** | `["env.*", "agents.*", "debugging.*"]` | `agents.debugging` | ❌ **Hard Blocked** |
+
+#### 2. Hybrid Dense-Graph Retrieval (Single Cypher Query)
+
+When `MemoryStore.retrieve_context(query)` is called:
+1. `query` is embedded via `memories/embedding.py`.
+2. Cypher queries Neo4j's native vector index (`entity_embeddings`) to locate seed entities.
+3. Active relationships (`is_active = true`) matching the caller's allowed `read_topics` are traversed.
+4. Active, deduplicated triples are formatted into the prompt under `### Active Knowledge (<namespace> subscribed)`.
+
+#### 3. Deterministic Invalidation & Extraction Pipeline
+
+- **Temporal Contradiction Resolution**: Functional 1-to-1 predicates (e.g. `PREFERS_EDITOR`, `HAS_OS`, `USES_SHELL`) automatically supersede prior active edges (`SET r.is_active = false, r.superseded_at = datetime()`).
+- **Decoupled Extraction**: The live Interpreter does **not** extract triples during user turns. An async extraction worker (`memories/knowledge_extractor.py`) processes turns in `tasks/long_term_worker.py` to write `user.*` and `env.*` triples.
+- **Zero-LLM Subagent Writes**: ToolBuilder, ToolDebugger, and AgentBuilder write structural nodes and relationships directly from Python AST, pytest traces, and Judge results.

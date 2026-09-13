@@ -1,39 +1,8 @@
 """
 memories/memory_store.py
-Central three-tier memory manager for MAVIS.
-
-Architecture (from FUTURE.md):
-  ┌──────────────────────────────────────────────────────────────────┐
-  │ Working memory  (in-process Python list, session lifetime)       │
-  │   Each turn: {role, content, timestamp, emotion,                 │
-  │               emotion_strength, intent_strength, embedding,      │
-  │               tool_failure}                                      │
-  │   Token cap: min(MAX_TOKEN, 0.4 * CONTEXT_WINDOW)               │
-  │   Overflow → compaction (LLM summary) → written to short-term   │
-  ├──────────────────────────────────────────────────────────────────┤
-  │ Short-term memory (ChromaDB + JSON, 7-day rolling window)        │
-  │   memories/short_term/chroma/   ← vector DB                     │
-  │   memories/short_term/json/     ← YYYY-MM-DD.json               │
-  ├──────────────────────────────────────────────────────────────────┤
-  │ Long-term memory  (ChromaDB + JSON, permanent)                   │
-  │   memories/long_term/chroma/    ← vector DB                     │
-  │   memories/long_term/json/behaviours.json                        │
-  │   memories/long_term/json/facts.json                             │
-  └──────────────────────────────────────────────────────────────────┘
-
-Embedding caching:
-  - Each turn dict stores its embedding vector at write time.
-  - The short-term worker reuses these cached vectors for repetition
-    detection — no re-embedding on each 15-min tick.
-  - ChromaDB stores embeddings for short/long-term on disk; retrieval
-    queries only embed the incoming query text, never existing memories.
-
-Token counting:
-  - Approximated as len(text) // 4.
-  - MAX_TOKEN default: 12 000 (overridable via MAX_TOKEN in .env).
-  - CONTEXT_WINDOW default: 1 000 000 (Gemini 2.5 Flash).
+Central memory manager for MAVIS with Neo4j Knowledge Graph,
+topic subscriptions, and file-backed episodic short-term storage.
 """
-
 from __future__ import annotations
 
 import json
@@ -42,8 +11,8 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
-import chromadb
 from google import genai
 
 from core.config import cfg
@@ -52,8 +21,36 @@ from core.llm import get_llm_client, BaseLLMClient
 from memories.embedding import embed, cosine_similarity
 from core.metrics import MetricEmitter
 
+try:
+    from memories.neo4j_graph import Neo4jKnowledgeGraph
+except ImportError:
+    Neo4jKnowledgeGraph = None
+
 _ENTITY = "memory_store"
 _METRICS_EMITTER = MetricEmitter("memory")
+
+_DEFAULT_TOPICS = {
+    "interpreter": {
+        "read": ["user.*", "env.*", "tooling.*", "agents.*"],
+        "write": "user.profile",
+    },
+    "toolbuilder": {
+        "read": ["env.*", "tooling.*", "debugging.*"],
+        "write": "tooling.tools",
+    },
+    "debugger": {
+        "read": ["env.*", "tooling.*", "debugging.*"],
+        "write": "debugging.fixes",
+    },
+    "agent_debugger": {
+        "read": ["env.*", "agents.*", "debugging.*"],
+        "write": "agents.debugging",
+    },
+    "tasks": {
+        "read": ["env.*", "tooling.*", "tasks.*"],
+        "write": "tasks.workflow",
+    },
+}
 
 # ── Configuration helpers (read live from central cfg) ────────────────────────
 def _max_token() -> int:
@@ -93,46 +90,54 @@ def _today() -> str:
 
 class MemoryStore:
     """
-    Thread-safe three-tier memory manager supporting domain namespaces.
-
-    Namespaces isolate memories on disk (e.g. 'interpreter', 'toolbuilder', 'debugger').
+    Thread-safe memory manager supporting domain namespaces,
+    Neo4j Knowledge Graph integration, and file-backed episodic short-term storage.
     """
 
-    def __init__(self, client: BaseLLMClient | Any | None = None, namespace: str = "interpreter"):
+    def __init__(
+        self,
+        client: BaseLLMClient | Any | None = None,
+        namespace: str = "interpreter",
+        read_topics: list[str] | None = None,
+        write_topic: str | None = None,
+    ):
         self.namespace = namespace
         self._client = client or get_llm_client()
         self._lock = threading.Lock()
 
+        # Topic subscriptions for Knowledge Graph
+        topic_cfg = _DEFAULT_TOPICS.get(namespace, {
+            "read": ["env.*", "tooling.*"],
+            "write": f"{namespace}.general",
+        })
+        self.read_topics: list[str] = read_topics if read_topics is not None else list(topic_cfg["read"])
+        self.write_topic: str = write_topic if write_topic is not None else topic_cfg["write"]
+
+        # Neo4j Knowledge Graph
+        self.kg: Any = None
+        if Neo4jKnowledgeGraph is not None:
+            try:
+                self.kg = Neo4jKnowledgeGraph()
+                if not self.kg.is_available():
+                    self.kg = None
+            except Exception as e:
+                log_it(f"Neo4jKnowledgeGraph initialization failed: {e}", _ENTITY)
+                self.kg = None
+
         # Paths scoped to this namespace
         self._ns_dir = os.path.join(_BASE, namespace)
-        self._st_chroma = os.path.join(self._ns_dir, "short_term", "chroma")
         self._st_json = os.path.join(self._ns_dir, "short_term", "json")
-        self._lt_chroma = os.path.join(self._ns_dir, "long_term", "chroma")
         self._lt_json = os.path.join(self._ns_dir, "long_term", "json")
         self._st_cursor = os.path.join(self._ns_dir, "short_term", ".cursor")
         self._lt_cursor = os.path.join(self._ns_dir, "long_term", ".cursor")
         self._wm_json = os.path.join(self._ns_dir, "working_memory.json")
 
-        for d in (self._st_chroma, self._st_json, self._lt_chroma, self._lt_json):
+        for d in (self._st_json, self._lt_json):
             os.makedirs(d, exist_ok=True)
 
         # Working memory: list of turn dicts
         self._working: list[dict] = []
         self.last_user_input_ts: float = 0.0
-
-        # ChromaDB clients
-        self._st_chroma_client = chromadb.PersistentClient(path=self._st_chroma)
-        self._lt_chroma_client = chromadb.PersistentClient(path=self._lt_chroma)
-
-        # Collections scoped per namespace
-        self._st_col = self._st_chroma_client.get_or_create_collection(
-            name=f"{namespace}_short_term",
-            metadata={"hnsw:space": "cosine"},
-        )
-        self._lt_col = self._lt_chroma_client.get_or_create_collection(
-            name=f"{namespace}_long_term",
-            metadata={"hnsw:space": "cosine"},
-        )
 
         # Ensure default long-term JSON files exist for this namespace
         default_files = {
@@ -168,20 +173,24 @@ class MemoryStore:
                 json.dump(payload, f)
             os.replace(tmp_file, self._wm_json)
         except Exception as e:
-            log_it(f"Failed to persist working memory: {e}", _ENTITY)
+            log_it(f"Failed to persist working memory to {self._wm_json}: {e}", _ENTITY)
 
     def reload_working_memory(self):
-        """Reload working memory and last_user_input_ts from disk (used by worker subprocesses)."""
+        """Reload working memory state from disk (safe across subprocesses)."""
         if not os.path.exists(self._wm_json):
             return
-        try:
-            with open(self._wm_json, "r") as f:
-                payload = json.load(f)
-            with self._lock:
-                self.last_user_input_ts = payload.get("last_user_input_ts", self.last_user_input_ts)
-                self._working = payload.get("working", self._working)
-        except Exception as e:
-            log_it(f"Failed to reload working memory: {e}", _ENTITY)
+        with self._lock:
+            try:
+                with open(self._wm_json, "r") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self.last_user_input_ts = data.get("last_user_input_ts", 0.0)
+                        self._working = data.get("working", [])
+                    elif isinstance(data, list):
+                        self._working = data
+                log_it(f"Reloaded {len(self._working)} working memory turns from {self._wm_json}.", _ENTITY)
+            except Exception as e:
+                log_it(f"Failed to reload working memory from {self._wm_json}: {e}", _ENTITY)
 
     def add_turn(
         self,
@@ -189,47 +198,43 @@ class MemoryStore:
         content: str,
         emotion: str = "neutral",
         emotion_strength: str = "low",
+        intent_strength: float = 0.0,
         directive: bool = False,
         tool_failure: bool = False,
-        intent_strength: float | None = None,
     ):
         """
-        Append a turn to working memory and check the token cap.
-
-        The embedding vector is computed HERE (once) and stored on the turn
-        dict so the short-term worker can reuse it for repetition detection
-        without any extra API calls.
+        Record a new conversational turn into working memory.
+        Computes and caches the embedding vector immediately on write.
+        Triggers compaction if working memory exceeds the token budget.
         """
-        embedding = embed(content, self._client)
+        now = time.time()
+        if role == "user":
+            self.last_user_input_ts = now
 
-        resolved_directive = (
-            directive if intent_strength is None else (directive or intent_strength > 0.85)
-        )
+        # Cache the embedding vector on the turn dict
+        vector = embed(content, self._client)
 
         turn = {
             "id": str(uuid.uuid4()),
             "role": role,
             "content": content,
-            "timestamp": time.time(),
+            "timestamp": now,
             "emotion": emotion,
             "emotion_strength": emotion_strength,
-            "directive": resolved_directive,
+            "intent_strength": intent_strength,
+            "directive": directive,
             "tool_failure": tool_failure,
-            "embedding": embedding,  # cached here — never re-embedded
+            "embedding": vector,
         }
 
         with self._lock:
             self._working.append(turn)
-            if role == "user":
-                self.last_user_input_ts = turn["timestamp"]
-
             self._maybe_compact()
             self._persist_working_memory_unlocked()
-            curr_tokens = self._working_tokens()
 
         _METRICS_EMITTER.log({
-            "event_type": "working_turn",
-            "working_tokens_count": curr_tokens,
+            "event_type": "turn_added",
+            "working_tokens_count": self._working_tokens(),
             "compaction_triggered": False,
             "tokens_freed": 0,
             "turns_evaluated": 1,
@@ -259,9 +264,7 @@ class MemoryStore:
     ) -> str:
         """
         Build the retrieval-augmented context string for the LLM prompt.
-
-        Supports cross-namespace subscriptions via *extra_namespaces*
-        (e.g., toolbuilder querying debugger fix memories).
+        Queries Neo4j for active structured facts, and file-backed tiers for episodic turns.
         """
         k = top_k if top_k is not None else _top_k()
         query_vec = embed(query, self._client)
@@ -271,45 +274,53 @@ class MemoryStore:
         def _truncate(text: str) -> str:
             return text[:max_chars] + "... [truncated]" if len(text) > max_chars else text
 
-        # Long-term top-K for this namespace
-        lt_entries = [_truncate(e) for e in self._query_chroma(self._lt_col, query_vec, k)]
+        # 1. Neo4j Active Knowledge (scoped to self.read_topics)
+        kg_entries = []
+        if self.kg and self.kg.is_available():
+            try:
+                facts = self.kg.query_active_facts(
+                    query,
+                    allowed_topics=self.read_topics,
+                    client=self._client,
+                    top_k=k,
+                )
+                if facts:
+                    kg_entries = [_truncate(f) for f in facts]
+                    sections.append(f"### Active Knowledge ({self.namespace} subscribed)")
+                    sections.extend([f"- {f}" for f in kg_entries])
+            except Exception as exc:
+                log_it(f"Neo4j query_active_facts failed: {exc}", _ENTITY)
+
+        # 2. Long-term memories from JSON files
+        lt_entries = [_truncate(e) for e in self._query_json_dir(self._lt_json, query_vec, k)]
         if lt_entries:
             sections.append(f"### Long-term memories ({self.namespace})")
             sections.extend(lt_entries)
 
-        # Cross-namespace peer memories
+        # 3. Cross-namespace peer memories from peer JSON files
         if extra_namespaces:
             for extra_ns in extra_namespaces:
                 try:
-                    peer_lt_path = os.path.join(_BASE, extra_ns, "long_term", "chroma")
+                    peer_lt_path = os.path.join(_BASE, extra_ns, "long_term", "json")
                     if os.path.exists(peer_lt_path):
-                        peer_chroma = chromadb.PersistentClient(path=peer_lt_path)
-                        peer_col = peer_chroma.get_or_create_collection(
-                            name=f"{extra_ns}_long_term",
-                            metadata={"hnsw:space": "cosine"},
-                        )
-                        peer_entries = [_truncate(e) for e in self._query_chroma(peer_col, query_vec, k)]
+                        peer_entries = [_truncate(e) for e in self._query_json_dir(peer_lt_path, query_vec, k)]
                         if peer_entries:
                             sections.append(f"### Reference memories ({extra_ns})")
                             sections.extend(peer_entries)
                 except Exception as exc:
                     log_it(f"Peer memory query ({extra_ns}) failed: {exc}", _ENTITY)
 
-        # Short-term top-K (scoped to rolling TTL window)
-        cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=_st_ttl_days())).strftime(
-            "%Y-%m-%d"
-        )
+        # 4. Short-term memories from rolling TTL window JSON files
+        cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=_st_ttl_days())).strftime("%Y-%m-%d")
         st_entries = [
             _truncate(e)
-            for e in self._query_chroma(
-                self._st_col, query_vec, k, min_date=cutoff
-            )
+            for e in self._query_short_term_json(query_vec, k, min_date=cutoff)
         ]
         if st_entries:
             sections.append(f"### Short-term memories ({self.namespace}, last {_st_ttl_days()} days)")
             sections.extend(st_entries)
 
-        # Working memory: bounded active turns + session summaries
+        # 5. Working memory: bounded active turns + session summaries
         max_active = _working_memory_active_turns()
         with self._lock:
             summaries = [
@@ -331,7 +342,7 @@ class MemoryStore:
 
         context = "\n".join(sections)
         log_it(
-            f"retrieve_context ({self.namespace}): lt={len(lt_entries)} st={len(st_entries)} "
+            f"retrieve_context ({self.namespace}): kg={len(kg_entries)} lt={len(lt_entries)} st={len(st_entries)} "
             f"wm={len(wm_lines)} turns",
             _ENTITY,
         )
@@ -341,34 +352,28 @@ class MemoryStore:
 
     def write_short_term(self, entry: dict):
         """
-        Write *entry* to today's short-term JSON file and ChromaDB collection.
+        Write *entry* to today's short-term JSON file.
         *entry* must have at least: id, content, timestamp.
         """
         today = _today()
         entry.setdefault("date", today)
+        if "embedding" not in entry:
+            entry["embedding"] = embed(entry["content"], self._client)
 
-        # JSON (human-readable reference)
         json_path = os.path.join(self._st_json, f"{today}.json")
         self._append_to_json(json_path, entry)
-
-        # ChromaDB — embed if no vector present
-        vector = entry.get("embedding") or embed(entry["content"], self._client)
-        self._st_col.upsert(
-            ids=[entry["id"]],
-            embeddings=[vector],
-            documents=[entry["content"]],
-            metadatas=[{"date": today, "role": entry.get("role", "system")}],
-        )
         log_it(f"write_short_term ({self.namespace}): id={entry['id']!r} date={today}", _ENTITY)
 
     def write_long_term(self, entry: dict, ltype: str):
         """
-        Write *entry* to long-term storage.
+        Write *entry* to long-term storage JSON file.
         Supported ltype: 'behaviour', 'fact', 'pattern', 'fix', 'event'.
         """
         entry.setdefault("id", str(uuid.uuid4()))
         entry.setdefault("date", _today())
         entry["ltype"] = ltype
+        if "embedding" not in entry:
+            entry["embedding"] = embed(entry["content"], self._client)
 
         # JSON file naming
         if ltype in ("behaviour", "fact", "pattern", "event"):
@@ -380,31 +385,60 @@ class MemoryStore:
 
         json_path = os.path.join(self._lt_json, fname)
         self._append_to_json(json_path, entry)
-
-        # ChromaDB
-        vector = entry.get("embedding") or embed(entry["content"], self._client)
-        self._lt_col.upsert(
-            ids=[entry["id"]],
-            embeddings=[vector],
-            documents=[entry["content"]],
-            metadatas=[{"type": ltype, "date": entry["date"]}],
-        )
         log_it(f"write_long_term ({self.namespace}): id={entry['id']!r} type={ltype!r}", _ENTITY)
 
     def write_pattern(self, tool_name: str, signature: str, summary: str):
         """Helper to write an established tool building pattern."""
         content = f"Tool Pattern [{tool_name}]: {signature}\nConvention / Summary: {summary}"
         self.write_long_term({"content": content, "tool": tool_name}, ltype="pattern")
+        if self.kg and self.kg.is_available():
+            try:
+                self.kg.add_tool_definition(tool_name, signature, summary, client=self._client)
+            except Exception as exc:
+                log_it(f"Failed to record tool pattern to Neo4j: {exc}", _ENTITY)
 
     def write_fix(self, tool_name: str, error_snippet: str, fix_summary: str):
         """Helper to write a tool debugging fix pair."""
         content = f"Tool Debug Fix [{tool_name}]: Error: {error_snippet}\nFix: {fix_summary}"
         self.write_long_term({"content": content, "tool": tool_name}, ltype="fix")
+        if self.kg and self.kg.is_available():
+            try:
+                self.kg.add_tool_fix(tool_name, error_snippet, fix_summary, client=self._client)
+            except Exception as exc:
+                log_it(f"Failed to record tool fix to Neo4j: {exc}", _ENTITY)
 
     def write_agent_fix(self, agent_name: str, failure_mode: str, fix_summary: str):
         """Helper to write an agent prompt/constraint debugging fix pair."""
         content = f"Agent Debug Fix [{agent_name}]: Failure Mode: {failure_mode}\nPrompt Remedy: {fix_summary}"
         self.write_long_term({"content": content, "agent": agent_name}, ltype="fix")
+        if self.kg and self.kg.is_available():
+            try:
+                self.kg.add_agent_fix(agent_name, failure_mode, fix_summary, client=self._client)
+            except Exception as exc:
+                log_it(f"Failed to record agent fix to Neo4j: {exc}", _ENTITY)
+
+    def add_fact(
+        self,
+        subject: str,
+        predicate: str,
+        obj: str,
+        topic: str | None = None,
+        is_functional: bool = True,
+    ):
+        """Add fact triple to Knowledge Graph using write_topic by default."""
+        target_topic = topic or self.write_topic
+        if self.kg and self.kg.is_available():
+            try:
+                self.kg.add_fact(
+                    subject=subject,
+                    predicate=predicate,
+                    obj=obj,
+                    topic=target_topic,
+                    is_functional=is_functional,
+                    client=self._client,
+                )
+            except Exception as exc:
+                log_it(f"Failed to write fact to Neo4j: {exc}", _ENTITY)
 
     # ── Cursor helpers for background workers ─────────────────────────────────
 
@@ -466,7 +500,6 @@ class MemoryStore:
             f"Compaction triggered: summarising {len(to_compact)} turns.", _ENTITY
         )
 
-        # Build a compact text block for the LLM to summarise
         block = "\n".join(
             f"[{t['role']}] {t['content']}" for t in to_compact
         )
@@ -495,9 +528,6 @@ class MemoryStore:
             "directive": False,
             "tool_failure": False,
         }
-        # Write summary to short-term (releases lock is fine — write_short_term
-        # is called outside the lock path but we're already under it here, so
-        # call the internal method directly)
         self._write_short_term_unlocked(summary_entry)
 
         tokens_freed = sum(_token_count(t["content"]) for t in to_compact)
@@ -515,15 +545,10 @@ class MemoryStore:
         """Same as write_short_term but assumes the caller holds _lock."""
         today = _today()
         entry.setdefault("date", today)
+        if "embedding" not in entry:
+            entry["embedding"] = embed(entry["content"], self._client)
         json_path = os.path.join(self._st_json, f"{today}.json")
         self._append_to_json(json_path, entry)
-        vector = embed(entry["content"], self._client)
-        self._st_col.upsert(
-            ids=[entry["id"]],
-            embeddings=[vector],
-            documents=[entry["content"]],
-            metadatas=[{"date": today, "role": entry.get("role", "system")}],
-        )
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 
@@ -537,46 +562,82 @@ class MemoryStore:
         except (FileNotFoundError, json.JSONDecodeError):
             data = []
 
-        # Strip the embedding vector from JSON — it's large and stored in Chroma
-        serialisable = {k: v for k, v in entry.items() if k != "embedding"}
-        data.append(serialisable)
+        data.append(entry)
 
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
 
-    @staticmethod
-    def _query_chroma(
-        collection,
+    def _query_short_term_json(
+        self,
         query_vec: list[float],
         top_k: int,
-        where: dict | None = None,
         min_date: str | None = None,
     ) -> list[str]:
-        """Query a ChromaDB collection and return the document strings."""
+        """Scan short-term JSON files and return top-K entries by cosine similarity."""
         try:
-            kwargs: dict = {
-                "query_embeddings": [query_vec],
-                "n_results": top_k if not min_date else max(top_k * 2, 10),
-                "include": ["documents", "metadatas"],
-            }
-            if where:
-                kwargs["where"] = where
-            results = collection.query(**kwargs)
-            docs = results.get("documents", [[]])[0]
-            metas = results.get("metadatas", [[]])[0] if results.get("metadatas") else []
+            if not os.path.exists(self._st_json):
+                return []
 
-            filtered_docs = []
-            for i, d in enumerate(docs):
-                if not d:
+            files = sorted(f for f in os.listdir(self._st_json) if f.endswith(".json"))
+            candidates = []
+
+            for fname in files:
+                date_str = fname.replace(".json", "")
+                if min_date and date_str < min_date:
                     continue
-                if min_date and metas and i < len(metas) and metas[i]:
-                    entry_date = metas[i].get("date", "")
-                    if entry_date and entry_date < min_date:
-                        continue
-                filtered_docs.append(d)
-                if len(filtered_docs) >= top_k:
-                    break
-            return filtered_docs
+                file_path = os.path.join(self._st_json, fname)
+                try:
+                    with open(file_path, "r") as f:
+                        entries = json.load(f)
+                        for item in entries:
+                            if not isinstance(item, dict) or "content" not in item:
+                                continue
+                            emb = item.get("embedding")
+                            if not emb:
+                                emb = embed(item["content"], self._client)
+                            sim = cosine_similarity(query_vec, emb)
+                            candidates.append((sim, item["content"]))
+                except Exception:
+                    continue
+
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            return [text for _, text in candidates[:top_k]]
         except Exception as exc:
-            log_it(f"ChromaDB query failed: {exc}", _ENTITY)
+            log_it(f"Query short-term JSON failed: {exc}", _ENTITY)
+            return []
+
+    def _query_json_dir(
+        self,
+        directory: str,
+        query_vec: list[float],
+        top_k: int,
+    ) -> list[str]:
+        """Scan directory of JSON files and return top-K entries by cosine similarity."""
+        try:
+            if not os.path.exists(directory):
+                return []
+
+            candidates = []
+            for fname in os.listdir(directory):
+                if not fname.endswith(".json"):
+                    continue
+                file_path = os.path.join(directory, fname)
+                try:
+                    with open(file_path, "r") as f:
+                        entries = json.load(f)
+                        for item in entries:
+                            if not isinstance(item, dict) or "content" not in item:
+                                continue
+                            emb = item.get("embedding")
+                            if not emb:
+                                emb = embed(item["content"], self._client)
+                            sim = cosine_similarity(query_vec, emb)
+                            candidates.append((sim, item["content"]))
+                except Exception:
+                    continue
+
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            return [text for _, text in candidates[:top_k]]
+        except Exception as exc:
+            log_it(f"Query JSON dir failed: {exc}", _ENTITY)
             return []

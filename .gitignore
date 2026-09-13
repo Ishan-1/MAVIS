@@ -32,11 +32,16 @@ logs/
 data/metrics/*.csv
 !data/metrics/.gitkeep
 
-# Database & ChromaDB data
+# Database & SQLite runtime caches
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
 *.sqlite3
 *.bin
-memories/**/chroma/
-data/tools_chroma/
+data/*.db
+memories/**/*.db
 
 # Auto-generated tools & test files
 tools/

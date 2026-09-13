@@ -19,10 +19,11 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
     - The terminal presentation layer automatically synthesizes and displays final outputs for the user.
     - Do NOT add a subagent or tool node simply to pretty-print or reformat simple tool returns (e.g. search_news output is directly answered).
 3.  **When to use Sub-Agents vs Tools:**
-    - `type: "tool"`: Use for deterministic environment actions (APIs, filesystem, shell, system time, regex).
+    - `type: "tool"`: Use for deterministic environment actions (APIs, filesystem, shell, system time, external MCP tools, regex).
     - `type: "subagent"`: Use `semantic_transform` when raw gathered data (e.g., concatenated file contents from `read_and_concatenate_files` or unstructured text) requires semantic summarization, analysis, or extraction.
 4.  **Anti-Proliferation & Generalization:**
     - Always use generalized tools and agents (such as `semantic_transform`) wherever possible.
+    - Check COMMANDS LIST first: if an available tool (including external MCP tools) can satisfy the intent, use it instead of generating new entries in `missing_commands`.
     - Avoid creating new agents or tools unless strictly required for a distinct, complex domain role.
 5.  **Build Pipeline (DAG):**
     - Each node has:
@@ -33,7 +34,7 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
     - If a required sub-agent is not in `AGENTS LIST` and cannot be fulfilled by `semantic_transform`, add to `missing_agents`.
     - Dependencies: use `"$node_id.output"` or `"$node_id.field_name"`.
 6.  **Caching Parameters:**
-    - `ttl`: Output TTL (time-to-live) in seconds for the pipeline result. For volatile queries (e.g., current time, weather) use a short TTL (like 60). For static data (e.g., historical facts), use a large TTL (like 86400). Default is 300.
+    - `ttl`: Output TTL (time-to-live) in seconds for the pipeline result. For volatile queries (e.g., current time, weather) use a short TTL (like 60). For static data (e.g., historical facts), use a large TTL. Default is 300.
     - `generalizability`: Specify if the generated pipeline is "generalized" (reusable with different parameters) or "specialized" (highly specific to the query).
 7.  **Emotion & Directive Classifier:**
     - `emotion`: frustration, excitement, urgency, sadness, neutral.

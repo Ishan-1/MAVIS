@@ -3,8 +3,8 @@
 - Cache reusable DAG pipelines
 - Cache results of previous executions
 ## Basic Structure
-- Caching will be handled by **ChromaDB**, which natively supports vector storage and similarity search.
-- Queries will be embedded and stored in ChromaDB collections, with metadata containing the associated pipeline ID and execution results.
+- Caching is handled by a lightweight, fast **SQLite** vector cache (`data/pipeline_cache.db`), using Python cosine similarity for sub-millisecond retrieval.
+- Queries are embedded and stored in SQLite, with metadata containing the associated pipeline, execution results, TTL timestamp, and generalizability class.
 
 ## Pipeline Caching Strategy
 - Let the interpreter output if a pipeline is cacheable by asking it whether it can be reused in the following manner: generalized or specialized.
@@ -16,7 +16,7 @@
 - **Cache Eviction**: A background job will handle cache eviction, enforcing the TTL. The system will use an **LRU (Least Recently Used)** strategy to manage the overall cache size when storage limits are reached.
 
 ## Caching Flow
-1. When a query comes, it is embedded and checked against the ChromaDB collection using vector similarity search to find the top-k matches.
+1. When a query comes, it is embedded and checked against the SQLite vector cache using cosine similarity to find the top-k matches.
 2. A tiered threshold approach is used for the similarity score:
    - **Similarity > 0.95**: Automatic cache hit. The cached result is served immediately only if its TTL is still valid. If the TTL has expired, the cached pipeline is executed.
    - **Similarity between 0.85 and 0.95**: The top-k queries (along with pipeline generalizability and result TTL) are passed to an LLM-driven module to verify the cache hit. If verified, the cache is reused; if rejected, execution hands off to the interpreter.
