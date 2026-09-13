@@ -115,7 +115,7 @@ _SLASH_SUBCOMMANDS = {
     "/metrics": [],
     "/dashboard": [],
     "/mcp": ["status", "list", "reload"],
-    "/goal": [],
+    "/goal": ["--yolo"],
 }
 
 _COMMAND_METAS = {
@@ -131,7 +131,7 @@ _COMMAND_METAS = {
     "/greylist": "Add command to ONI greylist",
     "/unlist": "Remove command from all ONI lists",
     "/mcp": "Inspect or manage MCP servers and tools",
-    "/goal": "Execute an autonomous multi-wave goal until completed",
+    "/goal": "Execute an autonomous multi-wave goal (add --yolo for unattended run)",
 }
 
 _SUBCOMMAND_METAS = {
@@ -265,7 +265,7 @@ _HELP_ROWS = [
     ("/greylist <cmd>",          "Add to ONI greylist."),
     ("/unlist <cmd>",            "Remove from all ONI lists."),
     ("/mcp [status|list|reload]","Inspect, list, or reload MCP servers and tools."),
-    ("/goal <description>",      "Autonomous multi-wave goal execution until completed."),
+    ("/goal [--yolo] <desc>",    "Autonomous multi-wave goal (use --yolo for unattended run)."),
 ]
 
 
@@ -353,12 +353,21 @@ def handle_slash_command(raw: str) -> bool:
         rule()
         return True
 
-    # ── /goal <description> ──────────────────────────────────────────────────
+    # ── /goal [--yolo] <description> ─────────────────────────────────────────
     if verb == "/goal":
-        goal_text = raw[len(parts[0]):].strip()
-        if not goal_text:
-            mavis_error("Please specify a goal, e.g.: /goal run all tests and fix errors")
+        remainder = raw[len(parts[0]):].strip()
+        opt_yolo = False
+        if remainder.startswith("--yolo"):
+            opt_yolo = True
+            remainder = remainder[6:].strip()
+
+        if not remainder:
+            mavis_error("Please specify a goal, e.g.: /goal run all tests and fix errors (or /goal --yolo for unattended run)")
             return True
+
+        goal_text = remainder
+        lease_trust = "yolo" if opt_yolo else _oni._effective_trust()
+
         agents_list = [
             a.replace(".py", "")
             for a in os.listdir("agents")
@@ -375,6 +384,7 @@ def handle_slash_command(raw: str) -> bool:
                 goal=goal_text,
                 max_iterations=8,
                 turn_id=turn_id,
+                lease_trust=lease_trust,
                 commands_list=commands_list,
                 agents_list=agents_list,
             )

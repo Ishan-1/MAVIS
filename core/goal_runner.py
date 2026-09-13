@@ -123,19 +123,48 @@ class GoalRunner:
         goal: str,
         max_iterations: int = 8,
         turn_id: str | None = None,
+        lease_trust: str | None = None,
         commands_list: dict[str, Any] | None = None,
         agents_list: list[str] | None = None,
+        auto_confirm_lease: bool = False,
     ) -> dict[str, Any]:
         """
         Execute an autonomous goal to completion or until max_iterations.
+        Defaults to the session's active trust level. If 'yolo' is explicitly
+        requested, requires an upfront user confirmation gate before wave 1.
         """
         goal_id = turn_id or f"goal_{int(time.time())}"
+        effective_lease = lease_trust or _oni._effective_trust()
+
         mavis_print(f"\n[bold cyan]═══ AUTONOMOUS GOAL RUNNER ═══[/bold cyan]")
         mavis_print(f"[bold]Goal:[/bold] {goal}")
-        mavis_print(f"[dim]Max Waves:[/dim] {max_iterations}  [dim]Task Lease:[/dim] ONI yolo lease active\n")
+        mavis_print(f"[dim]Max Waves:[/dim] {max_iterations}  [dim]Execution Trust:[/dim] [bold]{effective_lease}[/bold]")
+
+        # If elevated unattended access ('yolo') is requested, prompt for explicit upfront consent
+        if effective_lease == "yolo" and not auto_confirm_lease:
+            desc = (
+                f"AUTONOMOUS GOAL EXECUTION:\n"
+                f"Goal: '{goal}'\n"
+                f"This goal requests unattended 'yolo' permissions (no per-step confirmation) for up to {max_iterations} waves."
+            )
+            mavis_print(f"[bold yellow]⚠️  ONI Security Gate: Elevated 'yolo' lease requested for autonomous goal.[/bold yellow]")
+            approved = _oni.gate.request_approval(desc)
+            if not approved:
+                mavis_error("Goal execution aborted: Elevated 'yolo' task lease was declined by user.\n")
+                return {
+                    "goal_id": goal_id,
+                    "status": "cancelled",
+                    "waves": 0,
+                    "total_steps": 0,
+                    "summary": "Cancelled: 'yolo' task lease declined by user.",
+                    "history": [],
+                }
+            mavis_ok("Elevated 'yolo' task lease approved by user for this goal run.\n")
+        else:
+            mavis_print(f"[dim]Task Lease: Running under '{effective_lease}' trust level.[/dim]\n")
 
         # Acquire task-scoped lease
-        prev_lease = _oni.acquire_task_lease(f"goal_{goal_id}", lease_trust="yolo")
+        prev_lease = _oni.acquire_task_lease(f"goal_{goal_id}", lease_trust=effective_lease)
 
         history: list[dict[str, Any]] = []
         status = "in_progress"
