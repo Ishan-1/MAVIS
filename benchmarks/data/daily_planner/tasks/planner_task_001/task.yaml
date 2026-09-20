@@ -1,0 +1,28 @@
+schema_version: "mavis_v1"
+task_id: "planner_task_001"
+persona: "daily_planner"
+title: "Generate Daily Morning Briefing from Calendar Events"
+difficulty: "medium"
+
+trigger:
+  type: "user"
+  initial_input: "Good morning! Can you check what I have scheduled today and prepare my daily briefing?"
+
+hidden_intents:
+  - id: "parse_events"
+    content: "Read today's schedule from workspace/schedule.json"
+    weight: 1.0
+  - id: "detect_conflicts"
+    content: "Identify the 2:00 PM overlapping meeting conflict"
+    weight: 1.0
+  - id: "format_briefing"
+    content: "Generate workspace/daily_briefing.md with schedule breakdown and action items"
+    weight: 1.0
+
+injected_faults: []
+
+verification:
+  script: "verify.py"
+  artifacts:
+    - path: "daily_briefing.md"
+      must_contain: ["Standup", "Conflict", "Action Items"]

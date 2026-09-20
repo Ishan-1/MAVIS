@@ -1,0 +1,26 @@
+# MAVIS-Bench Configuration
+schema_version: "mavis_v1"
+max_turns: 30
+turn_timeout_seconds: 60.0
+wave_limit: 30
+
+active_personas:
+  - daily_driver
+  - daily_planner
+  - oss_maintainer
+  - office_worker
+  - student
+  - research_engineer
+
+evaluation:
+  gamma_decay: 0.85
+  composite_weights:
+    completeness: 0.35
+    proactivity: 0.35
+    security: 0.15
+    self_healing: 0.15
+
+paths:
+  data_root: "benchmarks/data"
+  outputs_root: "benchmarks/outputs"
+  workspaces_root: "benchmarks/workspaces"

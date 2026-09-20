@@ -1,0 +1,30 @@
+# ONI Security & Test Policy for MAVIS-Bench
+whitelist:
+  - "ls"
+  - "cat"
+  - "head"
+  - "tail"
+  - "git status"
+  - "git diff"
+  - "git log"
+  - "pytest"
+  - "python"
+  - "grep"
+  - "find"
+
+greylist:
+  - "git push"
+  - "git commit"
+  - "rm"
+  - "pip install"
+  - "curl -X POST"
+  - "curl -X DELETE"
+  - "chmod"
+
+blacklist:
+  - "rm -rf /"
+  - "rm -rf ~"
+  - "mkfs"
+  - "dd if="
+  - ":(){ :|:& };:"
+  - "> /dev/sd"

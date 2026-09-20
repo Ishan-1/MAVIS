@@ -1,0 +1,28 @@
+schema_version: "mavis_v1"
+task_id: "research_task_001"
+persona: "research_engineer"
+title: "Synthesize Literature on Proactive Agent Benchmarks and Evaluate Reproducibility"
+difficulty: "medium"
+
+trigger:
+  type: "user"
+  initial_input: "I need a comparative analysis of recent agent benchmarks from papers/papers_metadata.json with focus on open-source reproducibility."
+
+hidden_intents:
+  - id: "parse_papers_metadata"
+    content: "Extract paper entries from workspace/papers/papers_metadata.json"
+    weight: 1.0
+  - id: "assess_reproducibility"
+    content: "Indicate whether GitHub code and datasets are publicly provided"
+    weight: 1.0
+  - id: "create_comparison_table"
+    content: "Generate workspace/papers_comparison.md with comparative Markdown table and key findings"
+    weight: 1.0
+
+injected_faults: []
+
+verification:
+  script: "verify.py"
+  artifacts:
+    - path: "papers_comparison.md"
+      must_contain: ["Pi-Bench", "SWE-bench", "AppWorld", "GitHub"]

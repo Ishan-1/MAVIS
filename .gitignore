@@ -67,3 +67,10 @@ Thumbs.db
 *.swp
 *~
 #*#
+
+# Benchmark runtime workspaces & outputs
+benchmarks/outputs/
+benchmarks/workspaces/
+Pi-Bench/
+data/cache/
+

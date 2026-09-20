@@ -1,0 +1,25 @@
+{
+  "date": "2026-09-17",
+  "events": [
+    {
+      "time": "09:30 - 10:00",
+      "title": "Engineering Standup",
+      "location": "Google Meet"
+    },
+    {
+      "time": "11:00 - 12:00",
+      "title": "Product Roadmap Review",
+      "location": "Room 402"
+    },
+    {
+      "time": "14:00 - 14:45",
+      "title": "Client Onboarding Demo",
+      "location": "Zoom"
+    },
+    {
+      "time": "14:00 - 15:00",
+      "title": "Quarterly Budget Planning",
+      "location": "Boardroom"
+    }
+  ]
+}

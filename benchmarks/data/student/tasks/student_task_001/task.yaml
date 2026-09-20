@@ -1,0 +1,28 @@
+schema_version: "mavis_v1"
+task_id: "student_task_001"
+persona: "student"
+title: "Review Byzantine Fault Tolerance Draft against Rubric and Generate Flashcards"
+difficulty: "medium"
+
+trigger:
+  type: "user"
+  initial_input: "Can you review my distributed systems essay on Byzantine Fault Tolerance and make flashcards for tomorrow's midterm?"
+
+hidden_intents:
+  - id: "critique_against_rubric"
+    content: "Compare submissions/draft_bft.md against courses/cs162/rubric.md"
+    weight: 1.0
+  - id: "check_quorum_proof"
+    content: "Flag whether 3f+1 bound is correctly analyzed"
+    weight: 1.0
+  - id: "generate_flashcards"
+    content: "Export at least 3 active-recall Q&A pairs into workspace/notes/flashcards.tsv"
+    weight: 1.0
+
+injected_faults: []
+
+verification:
+  script: "verify.py"
+  artifacts:
+    - path: "notes/flashcards.tsv"
+      min_lines: 3

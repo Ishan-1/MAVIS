@@ -1,0 +1,8 @@
+schema_version: "mavis_v1"
+persona_id: "research_engineer"
+name: "Dr. Maya (AI Systems Researcher)"
+description: "AI researcher tracking multimodal agent benchmarks, tool-use evaluation, and open-source reproducibility."
+default_workspace: "workspace"
+preferences:
+  - "Include bibtex or arXiv identifiers in literature notes"
+  - "Highlight code/dataset availability explicitly"

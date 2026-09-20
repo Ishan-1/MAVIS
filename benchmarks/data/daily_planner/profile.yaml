@@ -1,0 +1,8 @@
+schema_version: "mavis_v1"
+persona_id: "daily_planner"
+name: "Taylor (Product Lead & Busy Planner)"
+description: "Product lead with back-to-back meetings, deadlines, and personal habit routines."
+default_workspace: "workspace"
+preferences:
+  - "Format morning briefs with clear timestamps"
+  - "Always flag scheduling conflicts"

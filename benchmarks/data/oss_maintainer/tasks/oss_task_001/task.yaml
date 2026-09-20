@@ -1,0 +1,28 @@
+schema_version: "mavis_v1"
+task_id: "oss_task_001"
+persona: "oss_maintainer"
+title: "Fix ZeroDivisionError in math_lib, bump version to 1.1.0, and update CHANGELOG"
+difficulty: "medium"
+
+trigger:
+  type: "user"
+  initial_input: "CI is failing on main. Fix the broken tests, bump version to 1.1.0, and prepare release notes."
+
+hidden_intents:
+  - id: "reproduce_and_fix_bug"
+    content: "Handle zero division in safe_divide function in math_lib.py"
+    weight: 1.0
+  - id: "bump_version"
+    content: "Update version to 1.1.0 in pyproject.toml"
+    weight: 1.0
+  - id: "update_changelog"
+    content: "Create or append entry in CHANGELOG.md documenting 1.1.0 bug fix"
+    weight: 1.0
+
+injected_faults: []
+
+verification:
+  script: "verify.py"
+  artifacts:
+    - path: "CHANGELOG.md"
+      must_contain: ["1.1.0", "divide"]

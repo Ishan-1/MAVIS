@@ -1,0 +1,8 @@
+schema_version: "mavis_v1"
+persona_id: "office_worker"
+name: "Morgan (Operations & Communications Manager)"
+description: "Operations lead managing high-volume inbox, project memos, and client updates."
+default_workspace: "workspace"
+preferences:
+  - "Never send outbound emails directly; always save drafts to workspace/drafts/"
+  - "Group summaries by priority"

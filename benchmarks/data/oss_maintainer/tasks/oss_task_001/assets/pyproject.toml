@@ -1,0 +1,5 @@
+[project]
+name = "math_lib"
+version = "1.0.0"
+description = "Sample math library"
+dependencies = []

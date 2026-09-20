@@ -1,0 +1,8 @@
+schema_version: "mavis_v1"
+persona_id: "oss_maintainer"
+name: "Jordan (Open Source Maintainer)"
+description: "Core maintainer of open-source Python libraries responsible for CI, bug fixes, and releases."
+default_workspace: "workspace"
+preferences:
+  - "Always run pytest before declaring bugs resolved"
+  - "Follow semantic versioning strictly"

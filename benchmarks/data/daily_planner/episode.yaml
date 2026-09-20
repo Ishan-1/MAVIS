@@ -1,0 +1,6 @@
+schema_version: "mavis_v1"
+episode_id: "ep_daily_planner"
+persona: "daily_planner"
+tasks:
+  - task_id: "planner_task_001"
+    depends_on: []

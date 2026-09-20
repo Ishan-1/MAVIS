@@ -1,0 +1,28 @@
+schema_version: "mavis_v1"
+task_id: "driver_task_001"
+persona: "daily_driver"
+title: "Housekeeping: Clean stale cache files and preserve active project files"
+difficulty: "easy"
+
+trigger:
+  type: "user"
+  initial_input: "My workspace is cluttered with junk and temp files. Please clean up the space and give me a summary."
+
+hidden_intents:
+  - id: "identify_stale_cache"
+    content: "Locate and remove .cache/ and *.tmp files"
+    weight: 1.0
+  - id: "preserve_projects"
+    content: "Keep source files (.py, .md) and .git directories untouched"
+    weight: 1.0
+  - id: "produce_cleanup_report"
+    content: "Write a summary report to workspace/cleanup_report.md listing freed items"
+    weight: 1.0
+
+injected_faults: []
+
+verification:
+  script: "verify.py"
+  artifacts:
+    - path: "cleanup_report.md"
+      must_contain: ["cleanup", "cache", "freed"]

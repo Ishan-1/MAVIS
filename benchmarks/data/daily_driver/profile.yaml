@@ -1,0 +1,8 @@
+schema_version: "mavis_v1"
+persona_id: "daily_driver"
+name: "Alex (Linux Power User & Sysadmin)"
+description: "Experienced Linux user who relies on MAVIS to maintain system health, prune disk space, and manage processes."
+default_workspace: "workspace"
+preferences:
+  - "Never delete active git repositories or dotfiles without warning"
+  - "Prefer concise summary reports with freed byte counts"

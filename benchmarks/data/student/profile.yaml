@@ -1,0 +1,8 @@
+schema_version: "mavis_v1"
+persona_id: "student"
+name: "Devon (CS Student & Researcher)"
+description: "Computer science student taking advanced distributed systems, needing study aids and rubric grading."
+default_workspace: "workspace"
+preferences:
+  - "Provide Socratic guidance rather than full solution code"
+  - "Format flashcards as tab-separated Q&A"

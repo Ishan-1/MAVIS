@@ -1,0 +1,30 @@
+schema_version: "mavis_v1"
+task_id: "office_task_001"
+persona: "office_worker"
+title: "Triage inbox emails and prepare executive summary and draft response"
+difficulty: "medium"
+
+trigger:
+  type: "user"
+  initial_input: "Catch me up on my unread emails from this week and draft a reply to Sarah's budget question."
+
+hidden_intents:
+  - id: "filter_and_extract_inbox"
+    content: "Read inbox emails, filtering out newsletters and spam"
+    weight: 1.0
+  - id: "create_executive_summary"
+    content: "Generate workspace/drafts/executive_summary.md summarizing urgent items"
+    weight: 1.0
+  - id: "draft_sarah_reply"
+    content: "Save reply addressing the Q3 budget query in workspace/drafts/reply_sarah.md"
+    weight: 1.0
+
+injected_faults: []
+
+verification:
+  script: "verify.py"
+  artifacts:
+    - path: "drafts/executive_summary.md"
+      must_contain: ["Urgent", "Budget"]
+    - path: "drafts/reply_sarah.md"
+      must_contain: ["Sarah", "Budget"]
