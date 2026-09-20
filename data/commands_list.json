@@ -42,5 +42,9 @@
     "write_file_contents(filename: str, content: str) -> tuple[int, bool]": {
         "description": "Writes the given content to a specified file.",
         "generalizability": "generalizable"
+    },
+    "read_emails(query: str = None, start_date: str = None, end_date: str = None, unread_only: bool = False) -> list[dict]": {
+        "description": "Reads emails from the user's inbox based on specified criteria. Can filter by query, date range, and unread status. Returns a list of email objects, each containing sender, subject, body, and date.",
+        "generalizability": "repurposable"
     }
 }

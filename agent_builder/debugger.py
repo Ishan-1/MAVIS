@@ -1,7 +1,7 @@
 """
 agent_builder/debugger.py
-AgentDebugger: Diagnoses prompt and schema failure modes from LLM-as-a-Judge diagnostics
-and synthesizes refined system instructions, constraints, and few-shots.
+AgentDebugger: Diagnoses prompt, schema, and ReAct failure modes from LLM-as-a-Judge diagnostics
+and synthesizes refined system instructions, constraints, and few-shots for both cognitive and subagent nodes.
 """
 from __future__ import annotations
 
@@ -9,14 +9,14 @@ import json
 from typing import Any
 from core.helpers import log_it
 from core.llm.base import BaseLLMClient
-from prompts.agent_prompt_templates import agent_debugger_prompt
+from prompts.agent_prompt_templates import cognitive_debugger_prompt, subagent_debugger_prompt
 
 _ENTITY = "agent_debugger"
 
 
 class AgentDebugger:
     """
-    Automated debugging loop for candidate cognitive agents.
+    Automated debugging loop for candidate cognitive agents and ReAct subagents.
     Tuning prompts, negative constraints, and output validation upon Judge failure.
     """
 
@@ -31,6 +31,7 @@ class AgentDebugger:
         failed_case: dict,
         actual_output: Any,
         failure_reason: str,
+        agent_type: str = "cognitive",
     ) -> tuple[str, str]:
         """
         Synthesize a corrected agent implementation based on failure feedback.
@@ -39,7 +40,13 @@ class AgentDebugger:
             (fixed_code, fix_summary)
         """
         failing_inputs = failed_case.get("inputs", {})
-        prompt = agent_debugger_prompt.format(
+        prompt_template = (
+            subagent_debugger_prompt
+            if str(agent_type).lower() == "subagent"
+            else cognitive_debugger_prompt
+        )
+
+        prompt = prompt_template.format(
             agent_name=agent_name,
             agent_description=agent_description,
             broken_code=broken_code,
@@ -53,7 +60,7 @@ class AgentDebugger:
             data = json.loads(raw)
             fixed_code = data.get("code", broken_code)
             fix_summary = data.get("fix_summary", "Refined prompt and negative constraints.")
-            log_it(f"AgentDebugger produced fix for '{agent_name}': {fix_summary}", _ENTITY)
+            log_it(f"AgentDebugger produced fix for '{agent_name}' ({agent_type}): {fix_summary}", _ENTITY)
             return fixed_code, fix_summary
         except Exception as e:
             log_it(f"AgentDebugger failed to repair agent '{agent_name}': {e}", _ENTITY)

@@ -1,13 +1,14 @@
 """
 agent_builder/tester.py
-AgentTester harness: Evaluates candidate cognitive sub-agents using LLM-as-a-Judge.
+AgentTester harness: Evaluates candidate cognitive nodes and ReAct subagents using LLM-as-a-Judge.
 Produces discrete binary 'passed' or 'failed' verdicts.
 """
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 from core.agents.base import BaseAgent
+from core.agents.subagent import Subagent
 from core.helpers import log_it
 from core.llm.base import BaseLLMClient
 from prompts.agent_prompt_templates import agent_tester_input_prompt, agent_judge_prompt
@@ -15,9 +16,14 @@ from prompts.agent_prompt_templates import agent_tester_input_prompt, agent_judg
 _ENTITY = "agent_tester"
 
 
+def _default_test_executor(tool_name: str, params: dict[str, Any]) -> tuple[int, Any]:
+    """Default fallback tool executor for testing subagents during build verification."""
+    return 0, f"Simulated output from tool '{tool_name}' for testing"
+
+
 class AgentTester:
     """
-    Automated test generator and LLM-as-a-Judge evaluator for MAVIS sub-agents.
+    Automated test generator and LLM-as-a-Judge evaluator for MAVIS cognitive nodes and subagents.
     """
 
     def __init__(self, client: BaseLLMClient):
@@ -29,10 +35,12 @@ class AgentTester:
         agent_description: str,
         input_schema: dict,
         output_schema: dict | None,
+        agent_type: str = "cognitive",
     ) -> list[dict]:
         """Generate 2-3 synthetic test inputs matching the agent's schema."""
         prompt = agent_tester_input_prompt.format(
             agent_name=agent_name,
+            agent_type=agent_type,
             agent_description=agent_description,
             input_schema=json.dumps(input_schema, indent=2),
             output_schema=json.dumps(output_schema, indent=2) if output_schema else "None (Unstructured text)",
@@ -87,28 +95,46 @@ class AgentTester:
         self,
         agent_instance: BaseAgent,
         test_cases: list[dict] | None = None,
+        executor: Callable[[str, dict[str, Any]], tuple[int, Any]] | None = None,
+        tool_retriever: Any | None = None,
+        available_tools: dict[str, Any] | None = None,
     ) -> tuple[int, dict]:
         """
         Run test suite on candidate agent instance.
+        If agent_instance is a Subagent, harness tool execution is injected.
+
         Returns:
             (0, {"summary": "..."}) if all test cases passed.
             (-1, {"failed_case": ..., "actual_output": ..., "reason": ...}) if any failed.
         """
+        is_subagent = isinstance(agent_instance, Subagent)
+        agent_type = "subagent" if is_subagent else "cognitive"
+
+        if is_subagent:
+            agent_instance.executor = executor or getattr(agent_instance, "executor", None) or _default_test_executor
+            if tool_retriever is not None:
+                agent_instance.tool_retriever = tool_retriever
+
         cases = test_cases or self.generate_test_cases(
             agent_name=agent_instance.name,
             agent_description=agent_instance.description,
             input_schema=agent_instance.input_schema,
             output_schema=agent_instance.output_schema,
+            agent_type=agent_type,
         )
 
-        log_it(f"Running {len(cases)} test case(s) for agent '{agent_instance.name}'", _ENTITY)
+        log_it(f"Running {len(cases)} test case(s) for {agent_type} '{agent_instance.name}'", _ENTITY)
 
         for case in cases:
             case_id = case.get("id", "unknown")
             inputs = case.get("inputs", {})
 
             # 1. Dynamic run
-            status, result = agent_instance.run(**inputs)
+            if is_subagent:
+                status, result = agent_instance.run(available_tools=available_tools or {}, **inputs)
+            else:
+                status, result = agent_instance.run(**inputs)
+
             if status != 0:
                 fail_reason = f"Execution error in test case '{case_id}': {result}"
                 log_it(fail_reason, _ENTITY)

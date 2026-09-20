@@ -74,9 +74,26 @@ class Answerer:
         user_prompt_parts.append(f"### User Request:\n{query}")
         user_prompt_parts.append(
             f"### Collected Tool & Agent Data (Reference Only):\n"
-            f"<tool_data>\n{data_block}\n</tool_data>\n\n"
-            f"Please provide the final response to the user:"
+            f"<tool_data>\n{data_block}\n</tool_data>"
         )
+
+        # Check for control node verification outcome
+        control_failures = []
+        for node_id, res in pipeline_results.items():
+            if isinstance(res, dict) and res.get("node_type") == "control":
+                if not res.get("success", False):
+                    control_failures.append(res.get("reason") or res.get("output") or "Verification condition unmet")
+
+        if control_failures:
+            user_prompt_parts.append(
+                "### CRITICAL POST-CONDITION VERIFICATION WARNING:\n"
+                "The automated pipeline completed its execution steps, but the terminal verification check failed:\n"
+                + "\n".join(f"- {fail}" for fail in control_failures) + "\n"
+                "You MUST acknowledge to the user that the verification check did not fully pass or that the task was only partially fulfilled. "
+                "Do NOT falsely claim that the task completed with 100% success."
+            )
+
+        user_prompt_parts.append("Please provide the final response to the user:")
 
         full_prompt = "\n\n".join(user_prompt_parts)
         input_tokens = len(full_prompt) // 4 + len(system_instruction) // 4

@@ -244,13 +244,16 @@ def _safe_eval_node(node: ast.AST, env: dict[str, Any]) -> Any:
     raise ValueError(f"Disallowed AST expression type: {type(node).__name__}")
 
 
-def evaluate_deterministic(condition_str: str, node_results: dict[str, Any]) -> bool:
+def evaluate_deterministic_with_reason(
+    condition_str: str,
+    node_results: dict[str, Any],
+) -> tuple[bool, str]:
     """
-    Safely evaluate a deterministic condition string against node results.
-    Replaces $node_id references with internal variables bound to NodeResultProxy objects.
+    Safely evaluate a deterministic condition string against node results,
+    returning a tuple of (verdict, reason).
     """
     if not condition_str or not condition_str.strip():
-        return True
+        return True, "Empty condition automatically satisfied"
 
     clean_cond = condition_str.strip()
 
@@ -274,23 +277,36 @@ def evaluate_deterministic(condition_str: str, node_results: dict[str, Any]) -> 
     try:
         parsed = ast.parse(sanitized_expr, mode="eval")
         result = _safe_eval_node(parsed, env)
-        return bool(result)
+        verdict = bool(result)
+        if verdict:
+            return True, f"Condition satisfied: '{condition_str}'"
+        return False, f"Condition evaluated to False: '{condition_str}'"
     except Exception as e:
-        log_it(f"Deterministic condition evaluation failed: '{condition_str}' -> {e}", _ENTITY)
-        return False
+        err_msg = f"Evaluation error: {e} (expression: '{condition_str}')"
+        log_it(f"Deterministic condition evaluation failed: {err_msg}", _ENTITY)
+        return False, err_msg
 
 
-def evaluate_nlp(
+def evaluate_deterministic(condition_str: str, node_results: dict[str, Any]) -> bool:
+    """
+    Safely evaluate a deterministic condition string against node results.
+    Replaces $node_id references with internal variables bound to NodeResultProxy objects.
+    """
+    verdict, _ = evaluate_deterministic_with_reason(condition_str, node_results)
+    return verdict
+
+
+def evaluate_nlp_with_reason(
     condition_str: str,
     context_payload: Any,
     client: BaseLLMClient | None = None,
-) -> bool:
+) -> tuple[bool, str]:
     """
     Evaluate a fuzzy semantic condition via fast LLM-as-a-judge.
-    Expects binary True/False judgment.
+    Returns (verdict, reason).
     """
     if not condition_str or not condition_str.strip():
-        return True
+        return True, "Empty condition automatically satisfied"
 
     if client is None:
         client = get_llm_client()
@@ -316,12 +332,85 @@ def evaluate_nlp(
         if m:
             data = json.loads(m.group(0))
             verdict = bool(data.get("verdict", False))
-            log_it(f"NLP Judge verdict for '{condition_str}': {verdict} ({data.get('reason', '')})", _ENTITY)
-            return verdict
+            reason = str(data.get("reason", "Semantic judgment rendered."))
+            log_it(f"NLP Judge verdict for '{condition_str}': {verdict} ({reason})", _ENTITY)
+            return verdict, reason
     except Exception as e:
         log_it(f"NLP condition evaluation error: {e}", _ENTITY)
+        return False, f"NLP judge exception: {e}"
 
-    return False
+    return False, "NLP judge returned unparseable response"
+
+
+def evaluate_nlp(
+    condition_str: str,
+    context_payload: Any,
+    client: BaseLLMClient | None = None,
+) -> bool:
+    """
+    Evaluate a fuzzy semantic condition via fast LLM-as-a-judge.
+    Expects binary True/False judgment.
+    """
+    verdict, _ = evaluate_nlp_with_reason(condition_str, context_payload, client=client)
+    return verdict
+
+
+def evaluate_control_node(
+    control_node: dict[str, Any],
+    node_results: dict[str, Any],
+    client: BaseLLMClient | None = None,
+) -> dict[str, Any]:
+    """
+    Execute a terminal control node to evaluate overall pipeline success.
+
+    Returns a structured dictionary:
+      {
+        "node_id": str,
+        "node_type": "control",
+        "success": bool,
+        "status": int (0 for success, 1 for failure),
+        "output": str,
+        "result": str,
+        "reason": str,
+        "eval_mode": str,
+        "condition": str,
+        "on_failure": str,
+      }
+    """
+    node_id = control_node.get("id", "control")
+    condition_str = (
+        control_node.get("condition")
+        or control_node.get("condition_str")
+        or control_node.get("expected_outcome", "")
+    )
+    mode = str(control_node.get("mode", "deterministic")).lower()
+    on_failure = control_node.get("on_failure", "trigger_debugger")
+
+    if mode == "nlp":
+        dep_matches = re.findall(r"\$([A-Za-z0-9_]+)", condition_str)
+        if dep_matches:
+            context = {d: node_results.get(d) for d in dep_matches if d in node_results}
+        else:
+            context = node_results
+        verdict, reason = evaluate_nlp_with_reason(condition_str, context, client=client)
+    else:
+        verdict, reason = evaluate_deterministic_with_reason(condition_str, node_results)
+
+    status_code = 0 if verdict else 1
+    output_msg = f"Control node '{node_id}' verification {'passed' if verdict else 'failed'}: {reason}"
+
+    return {
+        "node_id": node_id,
+        "node_type": "control",
+        "success": verdict,
+        "status": status_code,
+        "output": output_msg,
+        "result": output_msg,
+        "reason": reason,
+        "eval_mode": mode,
+        "condition": condition_str,
+        "on_failure": on_failure,
+    }
 
 
 def evaluate_gate(

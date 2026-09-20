@@ -115,5 +115,8 @@
                 }
             }
         }
+    },
+    "caching": {
+        "enabled": false
     }
 }

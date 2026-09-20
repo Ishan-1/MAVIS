@@ -37,7 +37,7 @@ CSV_SCHEMAS: dict[str, list[str]] = {
     "dag_execution": [
         "timestamp", "turn_id", "start_time", "end_time", "latency_ms",
         "status", "dag_size", "dag_depth", "tool_nodes_count",
-        "subagent_nodes_count", "failed_node_id"
+        "cognitive_nodes_count", "subagent_nodes_count", "failed_node_id"
     ],
     "caching": [
         "timestamp", "turn_id", "cache_status", "hit_tier",
@@ -49,9 +49,14 @@ CSV_SCHEMAS: dict[str, list[str]] = {
         "status", "attempt_count", "failure_reason",
         "debugger_prior_used", "input_tokens", "output_tokens"
     ],
-    "subagents": [
+    "cognitive": [
         "timestamp", "turn_id", "agent_name", "latency_ms",
         "status", "input_tokens", "output_tokens", "payload_truncated"
+    ],
+    "subagents": [
+        "timestamp", "turn_id", "agent_name", "latency_ms",
+        "status", "input_tokens", "output_tokens", "turns_count",
+        "tools_called_count", "hit_turn_cap"
     ],
     "oni": [
         "timestamp", "turn_id", "target_command_or_path", "phase",
@@ -293,7 +298,24 @@ def get_metrics_summary(since_timestamp: float | None = None) -> dict[str, Any]:
         "_raw_out": builder_out,
     }
 
-    # 6. Subagents
+    # 6a. Cognitive Nodes
+    cog_rows = _read_csv_rows("cognitive", since_timestamp)
+    cog_in = sum(int(r.get("input_tokens") or 0) for r in cog_rows)
+    cog_out = sum(int(r.get("output_tokens") or 0) for r in cog_rows)
+    cog_latencies = [float(r["latency_ms"]) for r in cog_rows if r.get("latency_ms")]
+    cog_stats = _compute_stats(cog_latencies)
+
+    summary["cognitive"] = {
+        "total_calls": len(cog_rows),
+        "latency": cog_stats,
+        "latency_ms": cog_stats,
+        "input_tokens": {"sum": cog_in},
+        "output_tokens": {"sum": cog_out},
+        "_raw_in": cog_in,
+        "_raw_out": cog_out,
+    }
+
+    # 6b. ReAct Subagents
     subagent_rows = _read_csv_rows("subagents", since_timestamp)
     subagent_in = sum(int(r.get("input_tokens") or 0) for r in subagent_rows)
     subagent_out = sum(int(r.get("output_tokens") or 0) for r in subagent_rows)
@@ -339,8 +361,8 @@ def get_metrics_summary(since_timestamp: float | None = None) -> dict[str, Any]:
     summary["overall_turn_latency_ms"] = _compute_stats(all_turn_latencies)
 
     # Global Tokens
-    total_in = interp_in_tokens + answerer_in + subagent_in + builder_in
-    total_out = interp_out_tokens + answerer_out + subagent_out + builder_out
+    total_in = interp_in_tokens + answerer_in + cog_in + subagent_in + builder_in
+    total_out = interp_out_tokens + answerer_out + cog_out + subagent_out + builder_out
     summary["tokens_total"] = {
         "input": total_in,
         "output": total_out,
@@ -375,8 +397,11 @@ def format_metrics_tables(since_timestamp: float | None = None) -> list[Table]:
     cache_lat = summary["caching"]["latency"]
     t1.add_row("Cache Check", str(cache_lat["count"]), f"{cache_lat['avg']:.0f}", f"{cache_lat['median']:.0f}", f"{cache_lat['max']:.0f}")
 
+    cog_lat = summary["cognitive"]["latency"]
+    t1.add_row("Cognitive Nodes", str(cog_lat["count"]), f"{cog_lat['avg']:.0f}", f"{cog_lat['median']:.0f}", f"{cog_lat['max']:.0f}")
+
     sub_lat = summary["subagents"]["latency"]
-    t1.add_row("Subagents (Cognitive)", str(sub_lat["count"]), f"{sub_lat['avg']:.0f}", f"{sub_lat['median']:.0f}", f"{sub_lat['max']:.0f}")
+    t1.add_row("Subagents (ReAct)", str(sub_lat["count"]), f"{sub_lat['avg']:.0f}", f"{sub_lat['median']:.0f}", f"{sub_lat['max']:.0f}")
     tables.append(t1)
 
     # Table 2: Token Economics
@@ -387,11 +412,13 @@ def format_metrics_tables(since_timestamp: float | None = None) -> list[Table]:
     t2.add_column("Total Tokens", justify="right")
 
     i_in, i_out = summary['interpreter']['_raw_in'], summary['interpreter']['_raw_out']
+    c_in, c_out = summary['cognitive']['_raw_in'], summary['cognitive']['_raw_out']
     s_in, s_out = summary['subagents']['_raw_in'], summary['subagents']['_raw_out']
     a_in, a_out = summary['answerer']['_raw_in'], summary['answerer']['_raw_out']
 
     t2.add_row("Interpreter", f"{i_in:,}", f"{i_out:,}", f"{i_in + i_out:,}")
-    t2.add_row("Subagents", f"{s_in:,}", f"{s_out:,}", f"{s_in + s_out:,}")
+    t2.add_row("Cognitive Nodes", f"{c_in:,}", f"{c_out:,}", f"{c_in + c_out:,}")
+    t2.add_row("Subagents (ReAct)", f"{s_in:,}", f"{s_out:,}", f"{s_in + s_out:,}")
     t2.add_row("Answerer", f"{a_in:,}", f"{a_out:,}", f"{a_in + a_out:,}")
     t2.add_row("[bold]Grand Total[/bold]", f"[bold]{summary['tokens_total']['input']:,}[/bold]", f"[bold]{summary['tokens_total']['output']:,}[/bold]", f"[bold]{summary['tokens_total']['grand_total']:,}[/bold]")
     tables.append(t2)
@@ -430,7 +457,7 @@ def get_turn_trace(turn_id: str) -> list[dict[str, Any]]:
     """
     trace: list[dict[str, Any]] = []
     categories = [
-        "interpreter", "caching", "dag_execution", "subagents",
+        "interpreter", "caching", "dag_execution", "cognitive", "subagents",
         "answerer", "oni", "memory", "pipeline_debugger", "gate_evaluator", "goal_runner"
     ]
 

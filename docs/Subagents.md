@@ -24,7 +24,7 @@ MAVIS reliably automates deterministic workflows by synthesizing Python tools on
 
 ## 2. Architectural Decision
 
-MAVIS adopts a **Heterogeneous Feedforward DAG** with **Stateless Sub-Agent Nodes** and a **Terminal Answerer Module**.
+MAVIS adopts a **Heterogeneous Feedforward DAG** with **Deterministic Tools**, **Stateless Cognitive Nodes**, **Bounded ReAct Subagents**, and a **Terminal Answerer Module**.
 
 ```
 User Input
@@ -33,7 +33,7 @@ User Input
 ┌─────────────────────────────────────────────────────────────┐
 │  Interpreter (Control Plane)                                │
 │  - Plans DAG ahead of time (zero untrusted data in context) │
-│  - Emits both "tool" nodes and "subagent" nodes             │
+│  - Emits "tool", "cognitive", and "subagent" nodes          │
 └──────────────────────────────┬──────────────────────────────┘
                                │
                                ▼
@@ -43,7 +43,10 @@ User Input
 │  Node 1: [tool] search_news (ONI / subprocess)             │
 │       │                                                     │
 │       ▼ $n1.output                                          │
-│  Node 2: [subagent] summarize_articles (In-memory LLM call) │
+│  Node 2: [cognitive] extract_key_points (1-shot LLM)        │
+│       │                                                     │
+│       ▼ $n2.output                                          │
+│  Node 3: [subagent] deep_investigate (ReAct loop, ONI tools)│
 └──────────────────────────────┬──────────────────────────────┘
                                │
                                ▼ (Pipeline Data)
@@ -59,21 +62,22 @@ User Input
 
 ## 3. Core Architectural Principles
 
-### A. Heterogeneous DAG: Tool Nodes vs. Sub-Agent Nodes
-Both tools and sub-agents conform to a uniform input/output contract:
+### A. Heterogeneous DAG: Tool, Cognitive & Subagent Primitives
+All nodes conform to a uniform input/output contract:
 $$\text{Parameters} \longrightarrow (\text{status\_code: int}, \text{result: Any})$$
 
 - **`type: "tool"`**: Deterministic Python modules. Subject to AST scanning, ONI trust rules, and subprocess isolation via `core/run_tool.py`.
-- **`type: "subagent"`**: Semantic/cognitive steps. Dispatched **in-memory** using MAVIS's active `BaseLLMClient`. No Python file is synthesized; no `pytest` validation is required.
+- **`type: "cognitive"`**: Stateless 1-shot semantic transformations (e.g. `semantic_transform`). Pure $f(\text{inputs}) \to \text{output}$ in-memory LLM call.
+- **`type: "subagent"`**: Bounded ReAct multi-turn tool-calling loop (Think $\to$ Act $\to$ Observe).
+  - **Cold-Start Scoping**: Tool selection occurs *before* seeing user payload, cached on `(agent_name, tool_registry_version)`.
+  - **Dynamic Turn Budget**: `default_max_turns` set by AgentBuilder, extendable up to 10 by Interpreter per DAG node.
+  - **Hard Cap Failure**: Hitting turn cap without resolution strictly returns `status = -1`.
+  - **Observation Quarantine**: All observations wrapped in `<tool_input>` with `</tool_input>` escaped. Large payloads ($>4$KB) offloaded to scratchpad.
 
-### B. Stateless, Ephemeral Sub-Agents
-Sub-agents are pure functional transformations:
-$$f(\text{instruction}, \text{inputs}) \longrightarrow \text{output}$$
-
-- **No Execution Loops:** Sub-agents execute once per DAG node. They do not maintain multi-turn conversations or dynamic loop-backs.
-- **Working Memory is Pure Input:** A sub-agent's context consists strictly of its declared inputs (e.g. `{"text": "$n1.output"}`) plus its task instruction.
-- **Cache-Optimized:** Static instruction headers enable maximum utilization of LLM provider prompt/context caching.
-- **Zero Write Permissions:** Sub-agents **cannot write** to MAVIS's ChromaDB or long-term memory namespaces. Only the top-level user turn can be promoted by background workers.
+### B. Anti-Proliferation & Escalation Hierarchy
+1. **Prefer `tool`** for deterministic ops.
+2. **Use `cognitive`** for 1-shot transformations and extraction.
+3. **Escalate to `subagent`** only when dynamic discovery requires iterative tool feedback.
 
 ### C. Terminal Answerer Module
 The DAG execution phase is strictly for **data acquisition and semantic transformation**, not final presentation.

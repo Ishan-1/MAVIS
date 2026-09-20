@@ -92,6 +92,9 @@ class CacheManager:
         Returns dict with 'pipeline' (and optionally 'result') if cache hit, else None.
         Emits observability metrics to data/metrics/caching.csv.
         """
+        if not cfg.caching.get("enabled", False):
+            return None
+
         t0 = time.perf_counter()
         try:
             query_vec = embed(query, self._client)
@@ -226,6 +229,9 @@ class CacheManager:
 
     def save_cache(self, query: str, pipeline: list[dict], result: Any, ttl_seconds: int = 300, generalizability: str = "specialized"):
         """Save a pipeline and its execution result to SQLite cache."""
+        if not cfg.caching.get("enabled", False):
+            return
+
         try:
             doc_id = str(hash(query))
             query_vec = embed(query, self._client)

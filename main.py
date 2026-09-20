@@ -35,7 +35,7 @@ llm = get_llm_client()
 tool_builder = ToolBuilder(llm)
 from agent_builder import AgentBuilder
 from core.answerer import Answerer
-from core.agents import load_agent
+from core.agents import load_agent, CognitiveNode, Subagent
 from core.pipeline_debugger import PipelineDebugger
 agent_builder = AgentBuilder(llm)
 answerer = Answerer(llm)
@@ -44,7 +44,7 @@ pipeline_debugger_mem = MemoryStore(llm, namespace="pipeline_debugger")
 pipeline_debugger = PipelineDebugger(llm, memory_store=pipeline_debugger_mem)
 tool_retriever = ToolRetriever(llm)
 from core.dag import validate_and_sort_dag, resolve_params, compute_pruned_nodes, extract_node_dependencies
-from core.gate_evaluator import evaluate_gate
+from core.gate_evaluator import evaluate_gate, evaluate_control_node
 from core.scratchpad import spill_if_large
 from core.caching import cache_manager
 from core.goal_runner import GoalRunner
@@ -933,6 +933,7 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
     dag_size = len(pipeline) if isinstance(pipeline, list) else 0
     dag_depth = compute_dag_depth(sorted_pipeline) if sorted_pipeline else 1
     tool_nodes_count = sum(1 for n in (sorted_pipeline or []) if n.get("type", "tool") == "tool")
+    cognitive_nodes_count = sum(1 for n in (sorted_pipeline or []) if n.get("type") == "cognitive")
     subagent_nodes_count = sum(1 for n in (sorted_pipeline or []) if n.get("type") == "subagent")
     _pipeline_start = time.perf_counter()
 
@@ -947,6 +948,7 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
             "dag_size": dag_size,
             "dag_depth": dag_depth,
             "tool_nodes_count": tool_nodes_count,
+            "cognitive_nodes_count": cognitive_nodes_count,
             "subagent_nodes_count": subagent_nodes_count,
             "failed_node_id": "dag_validation",
         })
@@ -964,6 +966,7 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
             "dag_size": dag_size,
             "dag_depth": dag_depth,
             "tool_nodes_count": tool_nodes_count,
+            "cognitive_nodes_count": cognitive_nodes_count,
             "subagent_nodes_count": subagent_nodes_count,
             "failed_node_id": "oni_preflight",
         })
@@ -1017,6 +1020,56 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
                 mavis_status(f"Gate '{node_id}' pruned step(s): {', '.join(sorted(newly_pruned))}")
             continue
 
+        if current_type == "control":
+            mavis_status(f"Evaluating terminal control node '{node_id}'...")
+            eval_result = evaluate_control_node(current_node, node_results, client=llm)
+
+            if eval_result.get("success"):
+                mavis_ok(f"Control verification '{node_id}' passed: {eval_result.get('reason')}")
+                node_results[node_id] = eval_result
+                continue
+
+            # Verification condition unmet
+            mavis_status(f"Control verification '{node_id}' condition unmet: {eval_result.get('reason')}")
+            on_failure = current_node.get("on_failure", "trigger_debugger")
+
+            if on_failure == "trigger_debugger":
+                mavis_status(f"[PipelineDebugger] Diagnosing control failure on step '{node_id}'...")
+                repair_plan = pipeline_debugger.diagnose_and_repair(
+                    failed_node=current_node,
+                    resolved_params=current_node,
+                    error_message=f"Control verification failed: {eval_result.get('reason')}",
+                    node_results=node_results,
+                    user_query=query,
+                    commands_list=commands_list,
+                    agents_list=agents_list,
+                    turn_id=turn_id,
+                )
+                action = repair_plan.get("action")
+                diagnosis = repair_plan.get("diagnosis", "")
+                patched = repair_plan.get("patched_node")
+
+                if action == "patch_params" and isinstance(patched, dict):
+                    mavis_status(f"[PipelineDebugger] Relaxing/patching control node: {diagnosis}")
+                    patched_node = dict(current_node)
+                    patched_node.update(patched)
+                    patched_eval = evaluate_control_node(patched_node, node_results, client=llm)
+                    if patched_eval.get("success"):
+                        mavis_ok(f"Patched control verification '{node_id}' passed: {patched_eval.get('reason')}")
+                        patched_eval["repaired"] = True
+                        patched_eval["repair_diagnosis"] = diagnosis
+                        node_results[node_id] = patched_eval
+                        continue
+                    else:
+                        mavis_status(f"Patched condition still unmet: {patched_eval.get('reason')}")
+                        eval_result = patched_eval
+                else:
+                    mavis_status(f"[PipelineDebugger] Verification condition could not be repaired/relaxed: {diagnosis}")
+
+            # Record outcome in node_results so presentation layer / answerer can ground on it
+            node_results[node_id] = eval_result
+            continue
+
         retry_count = 0
         node_success = False
 
@@ -1029,13 +1082,35 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
                     status = -1
                     result = f"Parameter resolution error: {res_err}"
                 else:
-                    if current_type == "subagent":
+                    if current_type == "cognitive":
                         agent = load_agent(current_command, llm)
+                        if not agent:
+                            status = -1
+                            result = f"Cognitive node '{current_command}' not found."
+                        else:
+                            status, result = agent.run(turn_id=turn_id, **resolved_params)
+                    elif current_type == "subagent":
+                        agent = load_agent(current_command, llm)
+                        if not agent and current_command in ("subagent", "react_agent"):
+                            agent = Subagent(llm)
+                            if "instruction" in current_node:
+                                agent.description = current_node["instruction"]
                         if not agent:
                             status = -1
                             result = f"Subagent '{current_command}' not found."
                         else:
-                            status, result = agent.run(turn_id=turn_id, **resolved_params)
+                            if isinstance(agent, Subagent):
+                                agent.executor = call_command
+                                agent.tool_retriever = tool_retriever
+                                max_turns = current_node.get("max_turns") or (resolved_params.pop("max_turns", None) if isinstance(resolved_params, dict) else None)
+                                status, result = agent.run(
+                                    turn_id=turn_id,
+                                    max_turns=max_turns,
+                                    available_tools=commands_list,
+                                    **resolved_params,
+                                )
+                            else:
+                                status, result = agent.run(turn_id=turn_id, **resolved_params)
                     elif mcp_manager.is_mcp_tool(current_command):
                         status, result = mcp_manager.call_tool(current_command, resolved_params)
                     elif current_command == "run_shell_command" and isinstance(resolved_params, dict) and "streamlit run" in str(resolved_params.get("command", "")):
@@ -1114,6 +1189,7 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
                 "dag_size": dag_size,
                 "dag_depth": dag_depth,
                 "tool_nodes_count": tool_nodes_count,
+                "cognitive_nodes_count": cognitive_nodes_count,
                 "subagent_nodes_count": subagent_nodes_count,
                 "failed_node_id": node_id,
             })
@@ -1133,6 +1209,7 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
             "dag_size": dag_size,
             "dag_depth": dag_depth,
             "tool_nodes_count": tool_nodes_count,
+            "cognitive_nodes_count": cognitive_nodes_count,
             "subagent_nodes_count": subagent_nodes_count,
             "failed_node_id": "",
         })
@@ -1401,6 +1478,9 @@ def interpret_command(command: str) -> bool:
                     or (new_agent.get("signature", "").split("(")[0].strip() if new_agent.get("signature") else None)
                 )
                 description = new_agent.get("description", "")
+                agent_type = new_agent.get("type", "cognitive")
+                default_max_turns = int(new_agent.get("default_max_turns", 4))
+                allowed_tools = new_agent.get("allowed_tools")
                 input_schema = new_agent.get("input_schema", {"content": "Any"})
                 output_schema = new_agent.get("output_schema")
             else:
@@ -1411,20 +1491,31 @@ def interpret_command(command: str) -> bool:
                 all_agents_built = False
                 continue
 
-            mavis_status(f"Building agent '{agent_name}'...")
+            mavis_status(f"Building {agent_type} agent '{agent_name}'...")
             try:
                 gen_score = agent_builder.build_agent(
                     agent_name=agent_name,
                     agent_description=description,
                     input_schema=input_schema,
                     output_schema=output_schema,
+                    agent_type=agent_type,
+                    default_max_turns=default_max_turns,
+                    allowed_tools=allowed_tools,
+                    executor=call_command,
+                    tool_retriever=tool_retriever,
+                    available_tools=commands_list,
                 )
                 sig = f"{agent_name}(...) -> tuple[int, Any]"
-                agents_list[sig] = {
+                entry: dict[str, Any] = {
+                    "type": agent_type,
                     "description": description,
                     "generalizability": gen_score,
                 }
-                mavis_ok(f"Built agent '{agent_name}'.")
+                if agent_type == "subagent":
+                    entry["default_max_turns"] = default_max_turns
+                    entry["allowed_tools"] = allowed_tools
+                agents_list[sig] = entry
+                mavis_ok(f"Built {agent_type} agent '{agent_name}'.")
             except Exception as e:
                 mavis_error(f"Couldn't build agent '{agent_name}': {e}. See logs/oni_audit.jsonl.")
                 all_agents_built = False

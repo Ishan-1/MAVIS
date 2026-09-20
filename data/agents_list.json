@@ -1,6 +1,12 @@
 {
     "semantic_transform(content: Any, instruction: str) -> tuple[int, Any]": {
+        "type": "cognitive",
         "description": "Transforms, extracts, filters, or structures input content according to a specific semantic instruction.",
         "generalizability": "generalizable"
+    },
+    "codefixeragent(workspace_path: Any, issue_description: Any) -> tuple[int, Any]": {
+        "type": "cognitive",
+        "description": "Analyzes failing tests, identifies root causes, and applies necessary code changes to fix them, ensuring the codebase is stable and tests pass.",
+        "generalizability": "specialized"
     }
 }

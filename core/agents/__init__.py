@@ -6,7 +6,8 @@ import importlib
 import os
 import sys
 from typing import Optional
-from core.agents.base import BaseAgent
+from core.agents.base import BaseAgent, CognitiveNode
+from core.agents.subagent import Subagent
 from core.llm.base import BaseLLMClient
 from core.helpers import log_it
 
@@ -30,7 +31,7 @@ def load_agent(agent_name: str, client: BaseLLMClient) -> Optional[BaseAgent]:
         # Look for a class subclassing BaseAgent
         for attr_name in dir(module):
             attr = getattr(module, attr_name)
-            if isinstance(attr, type) and issubclass(attr, BaseAgent) and attr is not BaseAgent:
+            if isinstance(attr, type) and issubclass(attr, BaseAgent) and attr not in (BaseAgent, CognitiveNode, Subagent):
                 return attr(client)
 
         log_it(f"No BaseAgent subclass found in {module_path}", _ENTITY)
@@ -40,4 +41,5 @@ def load_agent(agent_name: str, client: BaseLLMClient) -> Optional[BaseAgent]:
         return None
 
 
-__all__ = ["BaseAgent", "load_agent"]
+__all__ = ["BaseAgent", "CognitiveNode", "Subagent", "load_agent"]
+

@@ -34,6 +34,9 @@ Analyze the root cause:
 - Did a path lack a necessary directory prefix (e.g. 'docs/' was requested, but 'file.md' was passed)?
 - Was a parameter passed as an unparsed string when a list/dict was expected, or vice versa?
 - Did a tool fail because an alternative tool or cognitive agent (e.g. 'semantic_transform') is better suited?
+- For a verification/control step (`type: "control"`):
+  Did the verification condition fail because it was over-constrained, syntactically malformed, or looking for a pattern that differs slightly from what successful upstream steps actually output?
+  CORE PHILOSOPHY: User experience and forward progress take precedence over rigid verification checks. If the previous steps substantially fulfilled the user's intent, PREFER patching/relaxing the control condition (`action: "patch_params"` with a relaxed or corrected `condition`) so the pipeline does not fail the user's task.
 - Is this an external, unfixable error (e.g. invalid credentials, resource permanently missing, network down)?
 
 Output a JSON object with this exact schema:
@@ -42,14 +45,15 @@ Output a JSON object with this exact schema:
   "diagnosis": "Brief, clear explanation of why the step failed and what is being corrected.",
   "patched_node": {
     "id": "node_id",
-    "type": "tool" | "subagent",
+    "type": "tool" | "cognitive" | "subagent" | "control",
     "function_name": "function_or_agent_name",
+    "condition": "updated condition string if type is control",
     "params": { ... corrected parameters ... }
   }
 }
 
 Rules:
-1. If "action" is "patch_params", keep the same "id", "type", and "function_name", but supply corrected, valid "params".
+1. If "action" is "patch_params": keep the same "id" and "type". If it is a tool/subagent, keep "function_name" and supply corrected "params". If it is a control node, supply a corrected or relaxed "condition" (in top-level "condition" or inside "params").
 2. If "action" is "replace_node", provide an alternative "function_name" from the available tools or agents that achieves the same goal.
 3. If "action" is "unrecoverable", set "patched_node" to null.
 4. Respond ONLY with valid JSON.
@@ -151,6 +155,11 @@ class PipelineDebugger:
                 action = "unrecoverable"
                 diagnosis = "Debugger generated invalid patched_node structure."
                 patched_node = None
+
+            if failed_node.get("type") == "control" and isinstance(patched_node, dict):
+                patched_node.setdefault("type", "control")
+                if "condition" in patched_node.get("params", {}):
+                    patched_node["condition"] = patched_node["params"]["condition"]
 
             # If repair succeeded, persist fix to memory_store and Neo4j
             if action in ("patch_params", "replace_node") and patched_node and self.memory_store is not None:

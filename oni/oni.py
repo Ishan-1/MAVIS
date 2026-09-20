@@ -159,7 +159,7 @@ class ONI:
         greylisted: list[str] = []
 
         for node in pipeline:
-            if node.get("type") in ("subagent", "gate"):
+            if node.get("type") in ("cognitive", "subagent", "gate"):
                 continue
             command = node.get("function_name", "")
             params = node.get("params", {})

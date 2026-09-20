@@ -55,9 +55,9 @@ def extract_node_dependencies(node: dict) -> set[str]:
     elif isinstance(explicit_deps, str) and explicit_deps:
         deps.add(explicit_deps)
 
-    # 2. Gate condition dependencies: "condition": "$n1.status == 0"
-    if node.get("type") == "gate":
-        cond = node.get("condition") or node.get("condition_str", "")
+    # 2. Gate and Control condition dependencies: "condition": "$n1.status == 0"
+    if node.get("type") in ("gate", "control"):
+        cond = node.get("condition") or node.get("condition_str", "") or node.get("expected_outcome", "")
         if isinstance(cond, str):
             for m in DEP_SEARCH_RE.finditer(cond):
                 deps.add(m.group(1))
@@ -183,6 +183,12 @@ def validate_and_sort_dag(pipeline: list[dict]) -> tuple[list[dict] | None, str 
             for t in targets:
                 if t in nodes_by_id:
                     node_deps[t].add(node_id)
+
+    # Control nodes implicitly succeed all non-control nodes if no explicit deps were defined
+    for node_id, node in nodes_by_id.items():
+        if node.get("type") == "control" and not node_deps[node_id]:
+            all_other = {nid for nid, n in nodes_by_id.items() if nid != node_id and n.get("type") != "control"}
+            node_deps[node_id].update(all_other)
 
     # Verify self-deps and dangling references
     for node_id, deps in node_deps.items():

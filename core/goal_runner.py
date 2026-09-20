@@ -31,13 +31,20 @@ In each iteration, analyze what has already been accomplished and plan the NEXT 
 
 Each wave is an acyclic list of steps. Steps can be:
 1. "tool": standard tool invocation with "function_name" and "params".
-2. "subagent": delegate complex sub-tasks to specialized subagents.
-3. "gate": conditional check with:
+2. "cognitive": 1-shot semantic transformations and summaries.
+3. "subagent": iterative multi-turn ReAct tool-calling loops with optional "max_turns".
+4. "gate": conditional check with:
    - "type": "gate"
    - "mode": "deterministic" or "nlp"
    - "condition": e.g. "$step1.status == 0" or "len($step1.output) > 0"
    - "if_true": "next_step_id"
    - "if_false": "alternative_step_id" or null
+4. "control": terminal verification gate to verify success post-conditions:
+   - "type": "control"
+   - "mode": "deterministic" or "nlp"
+   - "condition": e.g. "$step1.status == 0"
+   - "expected_outcome": "what condition verifies goal completion"
+   - "on_failure": "trigger_debugger" or "report_failure"
 
 If the goal is fully achieved, set "status": "completed" and "pipeline": [].
 If further steps are required, set "status": "in_progress" and provide the "pipeline".
@@ -229,6 +236,17 @@ class GoalRunner:
                 total_steps_executed += step_count
                 wave_outcome = "success" if wave_results is not None else "failed"
 
+                # Check if wave had a control node
+                control_passed = None
+                if wave_results:
+                    for nid, res in wave_results.items():
+                        if isinstance(res, dict) and res.get("node_type") == "control":
+                            control_passed = bool(res.get("success"))
+                            if control_passed:
+                                mavis_ok(f"[Wave {iteration}] Post-condition verified: {res.get('reason')}")
+                            else:
+                                mavis_status(f"[Wave {iteration}] Post-condition unmet: {res.get('reason')}")
+
                 # Compact outcome for history
                 outcome_snippet = ""
                 if wave_results:
@@ -243,6 +261,7 @@ class GoalRunner:
                     "reasoning": reasoning,
                     "steps_count": step_count,
                     "outcome": outcome_snippet,
+                    "control_verified": control_passed,
                     "status": wave_outcome,
                 })
 

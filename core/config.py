@@ -109,7 +109,7 @@ _DEFAULTS: dict = {
         "provider": "gemini",               # gemini | openai | ollama
         "model": "gemini-2.5-flash",
         "embedding_model": "text-embedding-004",
-        "temperature": 0.2,
+        "temperature": 1.0,
         "vertexai": True,
         "base_url": None,
     },
@@ -126,6 +126,9 @@ _DEFAULTS: dict = {
         "database": os.getenv("NEO4J_DATABASE", "neo4j"),
         "vector_dimensions": 768,
         "similarity_threshold": 0.85,
+    },
+    "caching": {
+        "enabled": False,
     },
 }
 
@@ -196,6 +199,10 @@ class MAVISConfig:
     @property
     def neo4j(self) -> dict:
         return self._data.setdefault("neo4j", dict(_DEFAULTS["neo4j"]))
+
+    @property
+    def caching(self) -> dict:
+        return self._data.setdefault("caching", dict(_DEFAULTS["caching"]))
 
     # ── Generic get / set ─────────────────────────────────────────────────────
 

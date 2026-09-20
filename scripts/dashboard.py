@@ -164,7 +164,7 @@ with tab_overview:
     with c1:
         st.markdown("**Component Latencies Summary (ms)**")
         latency_rows = []
-        for comp in ["interpreter", "answerer", "dag_execution", "subagents", "builders"]:
+        for comp in ["interpreter", "answerer", "dag_execution", "cognitive", "subagents", "builders"]:
             stats = summary.get(comp, {})
             if "latency_ms" in stats:
                 latency_rows.append({
@@ -181,7 +181,7 @@ with tab_overview:
     with c2:
         st.markdown("**Token Consumption by Component**")
         token_rows = []
-        for comp in ["interpreter", "answerer", "subagents", "builders"]:
+        for comp in ["interpreter", "answerer", "cognitive", "subagents", "builders"]:
             stats = summary.get(comp, {})
             if "input_tokens" in stats and "output_tokens" in stats:
                 token_rows.append({
@@ -202,7 +202,7 @@ with tab_latency:
 
     comp_select = st.selectbox(
         "Select Component Stream",
-        options=["interpreter", "answerer", "dag_execution", "subagents", "builders"],
+        options=["interpreter", "answerer", "dag_execution", "cognitive", "subagents", "builders"],
         format_func=lambda x: x.capitalize(),
     )
 

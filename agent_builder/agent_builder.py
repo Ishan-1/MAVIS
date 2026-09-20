@@ -1,6 +1,6 @@
 """
 agent_builder/agent_builder.py
-AgentBuilder: Synthesizes, tests, and debugs reusable BaseAgent modules for MAVIS.
+AgentBuilder: Symmetrically synthesizes, tests, and debugs reusable CognitiveNode and Subagent modules for MAVIS.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from core.llm.base import BaseLLMClient
 from core.agents import load_agent
 from agent_builder.tester import AgentTester
 from agent_builder.debugger import AgentDebugger
-from prompts.agent_prompt_templates import agent_builder_prompt
+from prompts.agent_prompt_templates import cognitive_builder_prompt, subagent_builder_prompt
 from core.metrics import MetricEmitter
 
 _ENTITY = "agent_builder"
@@ -29,7 +29,7 @@ class AgentBuildError(Exception):
 
 class AgentBuilder:
     """
-    Lifecycle manager for cognitive sub-agents in MAVIS:
+    Lifecycle manager for cognitive nodes and ReAct subagents in MAVIS:
     generate → write to agents/ → LLM-as-a-Judge test → [debug loop] → register in agents_list.json.
     """
 
@@ -67,6 +67,9 @@ class AgentBuilder:
         agent_name: str,
         description: str,
         input_schema: dict,
+        agent_type: str = "cognitive",
+        default_max_turns: int = 4,
+        allowed_tools: list[str] | None = None,
         generalizability: str = "specialized",
     ):
         """Add successfully verified agent to data/agents_list.json."""
@@ -81,14 +84,20 @@ class AgentBuilder:
         params_str = ", ".join(f"{k}: Any" for k in input_schema.keys())
         sig = f"{agent_name}({params_str}) -> tuple[int, Any]"
 
-        catalog[sig] = {
+        entry: dict[str, Any] = {
+            "type": agent_type,
             "description": description,
             "generalizability": generalizability,
         }
+        if agent_type == "subagent":
+            entry["default_max_turns"] = default_max_turns
+            entry["allowed_tools"] = allowed_tools
+
+        catalog[sig] = entry
 
         with open(catalog_path, "w") as f:
             json.dump(catalog, f, indent=4)
-        log_it(f"Agent '{sig}' registered in {catalog_path}", _ENTITY)
+        log_it(f"Agent '{sig}' ({agent_type}) registered in {catalog_path}", _ENTITY)
 
     def _mark_needs_manual_fix(self, agent_name: str, last_error: str):
         """Prepend a warning comment to an agent file that exhausted retries."""
@@ -113,22 +122,31 @@ class AgentBuilder:
         agent_description: str,
         input_schema: dict,
         output_schema: dict | None = None,
+        agent_type: str = "cognitive",
+        default_max_turns: int = 4,
+        allowed_tools: list[str] | None = None,
         generalizability: str = "specialized",
+        executor: Any | None = None,
+        tool_retriever: Any | None = None,
+        available_tools: dict[str, Any] | None = None,
     ) -> str:
         """
         Full lifecycle: generate → write → test → debug loop → register.
+        Supports both 1-shot CognitiveNode and bounded ReAct Subagent.
         """
         if not agent_name or not isinstance(agent_name, str):
             raise AgentBuildError(f"agent_name must be a non-empty string, got {agent_name!r}")
         clean_name = agent_name.strip().lower()
         class_name = self._to_pascal_case(clean_name)
+        is_subagent = str(agent_type).lower() == "subagent"
+        clean_type = "subagent" if is_subagent else "cognitive"
 
         t0 = time.perf_counter()
         # ── 1. Query past agent debugger memories for priors ─────────────────────
         ref_context = ""
         try:
             mem_context = self.memory.retrieve_context(
-                f"{clean_name} {agent_description}",
+                f"{clean_name} {clean_type} {agent_description}",
                 top_k=2,
             )
             if mem_context:
@@ -137,14 +155,26 @@ class AgentBuilder:
             log_it(f"Memory retrieval in AgentBuilder failed: {me}", _ENTITY)
 
         # ── 2. Synthesize Agent Code ─────────────────────────────────────────────
-        prompt = agent_builder_prompt.format(
-            reference_context=ref_context,
-            agent_name=clean_name,
-            agent_description=agent_description,
-            input_schema=json.dumps(input_schema, indent=2),
-            output_schema=json.dumps(output_schema, indent=2) if output_schema else "None (Unstructured text)",
-            class_name=class_name,
-        )
+        if is_subagent:
+            prompt = subagent_builder_prompt.format(
+                reference_context=ref_context,
+                agent_name=clean_name,
+                agent_description=agent_description,
+                input_schema=json.dumps(input_schema, indent=2),
+                output_schema=json.dumps(output_schema, indent=2) if output_schema else "None (Unstructured text)",
+                default_max_turns=default_max_turns,
+                allowed_tools=json.dumps(allowed_tools) if allowed_tools else "None",
+                class_name=class_name,
+            )
+        else:
+            prompt = cognitive_builder_prompt.format(
+                reference_context=ref_context,
+                agent_name=clean_name,
+                agent_description=agent_description,
+                input_schema=json.dumps(input_schema, indent=2),
+                output_schema=json.dumps(output_schema, indent=2) if output_schema else "None (Unstructured text)",
+                class_name=class_name,
+            )
 
         raw_response = self.client.generate(prompt, json_mode=True)
         response_dict = json.loads(raw_response)
@@ -158,6 +188,7 @@ class AgentBuilder:
             agent_description=agent_description,
             input_schema=input_schema,
             output_schema=output_schema,
+            agent_type=clean_type,
         )
 
         attempt = 0
@@ -167,16 +198,30 @@ class AgentBuilder:
             if not agent_instance:
                 raise AgentBuildError(f"Could not load generated agent module 'agents/{clean_name}.py'")
 
-            status, test_result = self.tester.test_agent(agent_instance, test_cases=test_cases)
+            status, test_result = self.tester.test_agent(
+                agent_instance,
+                test_cases=test_cases,
+                executor=executor,
+                tool_retriever=tool_retriever,
+                available_tools=available_tools,
+            )
 
             if status == 0:
                 latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-                log_it(f"Agent '{clean_name}' passed verification on attempt {attempt}.", _ENTITY)
-                self._register_agent(clean_name, agent_description, input_schema, generalizability)
+                log_it(f"Agent '{clean_name}' ({clean_type}) passed verification on attempt {attempt}.", _ENTITY)
+                self._register_agent(
+                    agent_name=clean_name,
+                    description=agent_description,
+                    input_schema=input_schema,
+                    agent_type=clean_type,
+                    default_max_turns=default_max_turns,
+                    allowed_tools=allowed_tools,
+                    generalizability=generalizability,
+                )
 
                 _EMITTER.log({
                     "target_name": clean_name,
-                    "builder_type": "agent",
+                    "builder_type": clean_type,
                     "latency_ms": latency_ms,
                     "status": "passed",
                     "attempt_count": attempt,
@@ -192,7 +237,7 @@ class AgentBuilder:
                         self.memory.write_agent_fix(
                             clean_name,
                             last_failure_reason,
-                            f"Repaired and verified after {attempt} retry attempts.",
+                            f"Repaired and verified after {attempt} retry attempts for {clean_type} agent.",
                         )
                     except Exception as e:
                         log_it(f"Failed to record agent memory: {e}", _ENTITY)
@@ -205,7 +250,7 @@ class AgentBuilder:
             last_failure_reason = test_result.get("reason", "Verdict: failed")
 
             log_it(
-                f"Agent '{clean_name}' failed verification (attempt {attempt}/{self.MAX_RETRIES}): {last_failure_reason}",
+                f"Agent '{clean_name}' ({clean_type}) failed verification (attempt {attempt}/{self.MAX_RETRIES}): {last_failure_reason}",
                 _ENTITY,
             )
 
@@ -220,6 +265,7 @@ class AgentBuilder:
                 failed_case=failed_case,
                 actual_output=actual_output,
                 failure_reason=last_failure_reason,
+                agent_type=clean_type,
             )
             self._write_agent_file(clean_name, fixed_code)
             attempt += 1
@@ -228,7 +274,7 @@ class AgentBuilder:
         latency_ms = round((time.perf_counter() - t0) * 1000, 2)
         _EMITTER.log({
             "target_name": clean_name,
-            "builder_type": "agent",
+            "builder_type": clean_type,
             "latency_ms": latency_ms,
             "status": "failed",
             "attempt_count": attempt,
@@ -239,6 +285,6 @@ class AgentBuilder:
         })
         self._mark_needs_manual_fix(clean_name, last_failure_reason)
         raise AgentBuildError(
-            f"Agent '{clean_name}' failed all {self.MAX_RETRIES} verification attempts. "
+            f"Agent '{clean_name}' ({clean_type}) failed all {self.MAX_RETRIES} verification attempts. "
             f"Last reason: {last_failure_reason}"
         )

@@ -44,9 +44,12 @@ data/scratch/
 data/*.db
 memories/**/*.db
 
-# Auto-generated tools & test files
+# Auto-generated tools, agents, & test files
 tools/
 tests/
+agents/*
+!agents/__init__.py
+!agents/semantic_transform.py
 
 # Memory persistence & runtime data
 memories/**/.cursor
