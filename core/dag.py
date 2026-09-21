@@ -12,6 +12,7 @@ Provides:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import re
 from graphlib import TopologicalSorter, CycleError
 from typing import Any
@@ -19,6 +20,28 @@ from typing import Any
 # Pattern matching a parameter reference: $node_id or $node_id.field_name
 DEP_REF_RE = re.compile(r"^\$([A-Za-z0-9_]+)(?:\.([A-Za-z0-9_]+))?$")
 DEP_SEARCH_RE = re.compile(r"\$([A-Za-z0-9_]+)(?:\.([A-Za-z0-9_]+))?")
+SCRATCH_OFFLOAD_RE = re.compile(
+    r"\n?\.\.\. \[(?:\d+ lines / )?\d+ bytes offloaded to (?:file: )?(data/scratch/[^\s\]]+)\] \.\.\.\n?"
+)
+
+
+def dereference_scratchpad_value(val: Any) -> Any:
+    """If val is a string containing a scratchpad offload digest, restore full content from disk."""
+    if not isinstance(val, str):
+        return val
+    m = SCRATCH_OFFLOAD_RE.search(val)
+    if m:
+        scratch_path = m.group(1)
+        p = Path(scratch_path)
+        if p.exists() and p.is_file():
+            try:
+                full_content = p.read_text(encoding="utf-8")
+                # If the value is a head/notice/tail digest, the full content replaces the entire digest
+                return full_content
+            except Exception:
+                pass
+    return val
+
 
 
 def extract_dependencies_from_value(value: Any) -> set[str]:
@@ -240,12 +263,12 @@ def resolve_params(params: Any, node_results: dict[str, Any]) -> tuple[Any, str 
             payload = node_results[dep_id]
 
             if isinstance(payload, dict) and field and field in payload:
-                return payload[field], None
+                return dereference_scratchpad_value(payload[field]), None
             if field == "status":
                 return 0, None
             if not field or field == "output":
-                return payload, None
-            return payload, None
+                return dereference_scratchpad_value(payload), None
+            return dereference_scratchpad_value(payload), None
 
         if "$" in params:
             err_holder: list[str] = []
@@ -269,6 +292,7 @@ def resolve_params(params: Any, node_results: dict[str, Any]) -> tuple[Any, str 
                 else:
                     val = payload
 
+                val = dereference_scratchpad_value(val)
                 if isinstance(val, (dict, list)):
                     return json.dumps(val)
                 return str(val)
@@ -279,7 +303,8 @@ def resolve_params(params: Any, node_results: dict[str, Any]) -> tuple[Any, str 
             return resolved_str, None
 
         # Return original string if not a reference
-        return params, None
+        return dereference_scratchpad_value(params), None
+
 
     if isinstance(params, list):
         resolved_list = []

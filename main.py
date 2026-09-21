@@ -1004,7 +1004,7 @@ def call_command(command_name, params_dict):
 
 # ── Pipeline execution ────────────────────────────────────────────────────────
 
-def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str = ""):
+def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str = "", is_goal_wave: bool = False):
     """
     Execute a list of pipeline nodes in topological sorted order, resolving dependencies.
 
@@ -1165,13 +1165,24 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
                     status = -1
                     result = f"Parameter resolution error: {res_err}"
                 else:
+                    llm_params = resolved_params
+                    if current_type in ("cognitive", "subagent") and isinstance(resolved_params, dict):
+                        guarded = {}
+                        for pk, pv in resolved_params.items():
+                            if isinstance(pv, str) and len(pv) > 24000:
+                                comp_pv, _ = spill_if_large(turn_id, f"{node_id}_in_{pk}", pv, threshold_bytes=24000)
+                                guarded[pk] = comp_pv
+                            else:
+                                guarded[pk] = pv
+                        llm_params = guarded
+
                     if current_type == "cognitive":
                         agent = load_agent(current_command, llm)
                         if not agent:
                             status = -1
                             result = f"Cognitive node '{current_command}' not found."
                         else:
-                            status, result = agent.run(turn_id=turn_id, **resolved_params)
+                            status, result = agent.run(turn_id=turn_id, **llm_params)
                     elif current_type == "subagent":
                         agent = load_agent(current_command, llm)
                         if not agent and current_command in ("subagent", "react_agent"):
@@ -1185,15 +1196,15 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
                             if isinstance(agent, Subagent):
                                 agent.executor = call_command
                                 agent.tool_retriever = tool_retriever
-                                max_turns = current_node.get("max_turns") or (resolved_params.pop("max_turns", None) if isinstance(resolved_params, dict) else None)
+                                max_turns = current_node.get("max_turns") or (llm_params.pop("max_turns", None) if isinstance(llm_params, dict) else None)
                                 status, result = agent.run(
                                     turn_id=turn_id,
                                     max_turns=max_turns,
                                     available_tools=commands_list,
-                                    **resolved_params,
+                                    **llm_params,
                                 )
                             else:
-                                status, result = agent.run(turn_id=turn_id, **resolved_params)
+                                status, result = agent.run(turn_id=turn_id, **llm_params)
                     elif mcp_manager.is_mcp_tool(current_command):
                         status, result = mcp_manager.call_tool(current_command, resolved_params)
                     elif current_command == "run_shell_command" and isinstance(resolved_params, dict) and "streamlit run" in str(resolved_params.get("command", "")):
@@ -1214,7 +1225,8 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
                 compact_result, scratch_path = spill_if_large(turn_id, node_id, result)
                 if scratch_path:
                     mavis_status(f"Step '{node_id}' output offloaded to scratchpad: {scratch_path}")
-                node_results[node_id] = compact_result
+                # Store full un-truncated result in node_results so downstream tools receive complete data
+                node_results[node_id] = result
                 node_success = True
                 if retry_count > 0:
                     mavis_ok(f"Step '{node_id}' recovered and executed successfully after {retry_count} repair(s).")
@@ -1297,10 +1309,14 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
             "failed_node_id": "",
         })
 
-    if node_results and pipeline:
+    if not is_goal_wave and node_results and pipeline:
+        synth_results = {}
+        for nid, res in node_results.items():
+            comp_res, _ = spill_if_large(turn_id, nid, res, threshold_bytes=8000)
+            synth_results[nid] = comp_res
         final_answer = answerer.synthesize(
             query=query,
-            pipeline_results=node_results,
+            pipeline_results=synth_results,
             memory_context=context,
             turn_id=turn_id,
         )
@@ -1311,6 +1327,7 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         })
 
+
     # Fire notification if the pipeline took longer than the configured threshold
     threshold = cfg.output.get("notify_pipeline_threshold_s", 5)
     if elapsed_s >= threshold:
@@ -1319,7 +1336,14 @@ def execute_pipeline(pipeline, query: str = "", context: str = "", turn_id: str 
     return None if execution_failed else node_results
 
 
-goal_runner = GoalRunner(llm=llm, execute_pipeline_fn=execute_pipeline, memory_store=memory_store)
+goal_runner = GoalRunner(
+    llm=llm,
+    execute_pipeline_fn=execute_pipeline,
+    memory_store=memory_store,
+    tool_builder=tool_builder,
+    agent_builder=agent_builder,
+    tool_retriever=tool_retriever,
+)
 
 
 # ── Interpreter ───────────────────────────────────────────────────────────────

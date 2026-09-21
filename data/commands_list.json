@@ -40,7 +40,7 @@
         "generalizability": "repurposable"
     },
     "write_file_contents(filename: str, content: str) -> tuple[int, bool]": {
-        "description": "Writes the given content to a specified file.",
+        "description": "Writes the given content to a specified file. Creates the file if it doesn't exist, overwrites if it does.",
         "generalizability": "generalizable"
     },
     "set_email_filter_preference(filter_type: str, value: str, action: str = 'exclude')": {
@@ -50,5 +50,25 @@
     "get_schedule(date: str) -> list[dict]": {
         "description": "Retrieves scheduled events for a specific date. Returns a list of event objects, each containing details like title, time, and description.",
         "generalizability": "repurposable"
+    },
+    "split_text_into_chunks(text: str, max_chunk_size: int) -> tuple[int, list[str]]": {
+        "description": "Splits a given text into a list of smaller text chunks, ensuring no chunk exceeds `max_chunk_size` characters. It attempts to split on natural breaks (e.g., newlines, function definitions) if possible, but will split mid-line if necessary to respect `max_chunk_size`. Returns a tuple where the first element is 0 for success and the second is a list of strings (chunks).",
+        "generalizability": "generalizable"
+    },
+    "parse_list_string(list_string: str, index: int = None) -> tuple[int, Union[list[str], str]]": {
+        "description": "Parses a string representation of a Python list (e.g., \"['item1', 'item2']\") into an actual list. If an index is provided, it returns the element at that index. Otherwise, it returns the full list.",
+        "generalizability": "generalizable"
+    },
+    "write_file_contents(filename: str, content: str) -> tuple[int, str]": {
+        "description": "Writes the given content to a specified file. If the file does not exist, it will be created. If the file exists, its content will be overwritten.",
+        "generalizability": "generalizable"
+    },
+    "get_list_element_safe(list_data: list, index: int) -> tuple[int, str | None]": {
+        "description": "Safely retrieves an element from a list by its index. Returns the element as a string if found, or None if the index is out of bounds or the list is empty.",
+        "generalizability": "generalizable"
+    },
+    "get_list_length(list_data: list) -> tuple[int, int]": {
+        "description": "Returns the number of elements in a given list.",
+        "generalizability": "generalizable"
     }
 }

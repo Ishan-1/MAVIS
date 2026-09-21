@@ -87,9 +87,48 @@ class ToolTester:
                 )
                 return -1, f"Test function for {func_name} not found."
 
-            result = test_function()
-            log_it(f"Test for {func_name} executed successfully.", self.entity_name)
-            return 0, result
+            import inspect
+            import tempfile
+            import pathlib
+            from oni import oni as _oni
+
+            sig = inspect.signature(test_function)
+            kwargs = {}
+            temp_dirs_to_clean = []
+            added_approved_paths = []
+
+            scratch_dir = os.path.abspath("data/scratch")
+            os.makedirs(scratch_dir, exist_ok=True)
+
+            try:
+                for param_name in sig.parameters:
+                    if param_name in ("tmp_path", "tmpdir"):
+                        td = tempfile.TemporaryDirectory(dir=scratch_dir)
+                        temp_dirs_to_clean.append(td)
+                        if hasattr(_oni.config, "approved_fs_write_paths"):
+                            if td.name not in _oni.config.approved_fs_write_paths:
+                                _oni.config.approved_fs_write_paths.append(td.name)
+                                added_approved_paths.append(td.name)
+                        if param_name == "tmp_path":
+                            kwargs["tmp_path"] = pathlib.Path(td.name)
+                        else:
+                            kwargs["tmpdir"] = td.name
+
+                result = test_function(**kwargs)
+                log_it(f"Test for {func_name} executed successfully.", self.entity_name)
+                return 0, result
+            finally:
+                if hasattr(_oni.config, "approved_fs_write_paths"):
+                    for p in added_approved_paths:
+                        try:
+                            _oni.config.approved_fs_write_paths.remove(p)
+                        except (ValueError, KeyError):
+                            pass
+                for td in temp_dirs_to_clean:
+                    try:
+                        td.cleanup()
+                    except Exception:
+                        pass
 
         except Exception as e:
             full_tb = tb_module.format_exc()

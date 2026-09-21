@@ -2,8 +2,15 @@ import os
 import time
 import traceback
 from google import genai
-from prompts.prompt_templates import builder_prompt, tester_prompt, debug_prompt
+from prompts.prompt_templates import (
+    builder_prompt,
+    tester_prompt,
+    debug_prompt,
+    tool_updater_prompt,
+    tool_updater_tester_prompt,
+)
 import json
+
 from core.config import cfg
 from core.helpers import log_it
 from core.output import mavis_status, mavis_warn
@@ -342,7 +349,182 @@ class ToolBuilder:
             f"Tool '{func_name}' failed all {self.MAX_RETRIES} debug attempts."
         )
 
+    def update_tool(self, tool_name: str, requested_changes: str) -> str:
+        """
+        Evolve an existing tool in-place based on requested changes.
+        Enforces backwards compatibility (new parameters must have defaults),
+        re-runs test verification with ToolTester, and updates commands_list.json
+        and ToolRetriever registry.
+
+        Raises:
+            ToolBuildError: if tool is protected, not found, or fails all test retries.
+        """
+        from core.manager import PROTECTED_BASELINE_TOOLS
+        clean_name = tool_name.strip()
+        if clean_name in PROTECTED_BASELINE_TOOLS:
+            raise ToolBuildError(f"Cannot update protected baseline tool '{clean_name}'.")
+
+        tool_path = f"tools/{clean_name}.py"
+        if not os.path.exists(tool_path):
+            raise ToolBuildError(f"Tool '{clean_name}' does not exist at {tool_path}.")
+
+        with open(tool_path, "r", encoding="utf-8") as f:
+            current_code = f.read()
+
+        current_sig = f"{clean_name}(...)"
+        current_desc = ""
+        current_gen = "repurposable"
+        old_key = None
+
+        if os.path.exists("data/commands_list.json"):
+            try:
+                with open("data/commands_list.json", "r", encoding="utf-8") as f:
+                    commands = json.load(f)
+                for sig, info in commands.items():
+                    func = sig.split("(")[0].strip()
+                    if func == clean_name:
+                        old_key = sig
+                        current_sig = sig
+                        if isinstance(info, dict):
+                            current_desc = info.get("description", "")
+                            current_gen = info.get("generalizability", "repurposable")
+                        else:
+                            current_desc = str(info)
+                        break
+            except Exception as e:
+                log_it(f"Error reading commands_list.json in update_tool: {e}", self.entity_name)
+
+        t0 = time.perf_counter()
+
+        ref_context = ""
+        try:
+            mem_context = self.memory.retrieve_context(
+                f"{clean_name} {requested_changes}",
+                extra_namespaces=["debugger"],
+                top_k=2,
+            )
+            if mem_context:
+                ref_context = f"RELEVANT MEMORY CONTEXT:\n{mem_context}\n"
+        except Exception as me:
+            log_it(f"Memory retrieval in ToolBuilder.update_tool failed: {me}", self.entity_name)
+
+        # 1. Generate updated tool code
+        prompt = tool_updater_prompt.format(
+            tool_name=clean_name,
+            current_signature=current_sig,
+            current_description=current_desc,
+            current_code=current_code,
+            requested_changes=f"{requested_changes}\n\n{ref_context}",
+        )
+        response_raw = self._llm(prompt)
+        log_it(f"Update Tool LLM response: {response_raw}", self.entity_name)
+        response = json.loads(response_raw)
+        updated_code = response["code"]
+        updated_sig = response.get("updated_signature", current_sig)
+        updated_desc = response.get("updated_description", current_desc)
+        raw_gen = str(response.get("generalizability", current_gen)).strip().lower()
+        generalizability = raw_gen if raw_gen in ("generalizable", "repurposable", "specialized") else "repurposable"
+
+        self.write_tool(response.get("requirements", []), response.get("env", []), updated_code)
+
+        # 2. Generate updated tests
+        tester_prompt_str = tool_updater_tester_prompt.format(
+            func_name=clean_name,
+            updated_signature=updated_sig,
+            updated_description=updated_desc,
+            updated_code=updated_code,
+        )
+        tester_raw = self._llm(tester_prompt_str)
+        log_it(f"Update Tester LLM response: {tester_raw}", self.entity_name)
+        test_code = json.loads(tester_raw)["code"]
+        self.write_tool_tests(clean_name, test_code)
+
+        # 3. Test → Debug Loop
+        from tool_builder.tester import ToolTester
+        tester = ToolTester(self.client)
+
+        attempt = 0
+        while attempt <= self.MAX_RETRIES:
+            status, result = tester.test_tool(clean_name, check_imports=True)
+            if status == 0:
+                latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+                log_it(f"Updated tool '{clean_name}' passed tests on attempt {attempt}.", self.entity_name)
+
+                # Update commands_list.json
+                with open("data/commands_list.json", "r", encoding="utf-8") as f:
+                    commands = json.load(f)
+                if old_key and old_key in commands and old_key != updated_sig:
+                    del commands[old_key]
+                commands[updated_sig] = {
+                    "description": updated_desc,
+                    "generalizability": generalizability,
+                }
+                with open("data/commands_list.json", "w", encoding="utf-8") as f:
+                    json.dump(commands, f, indent=4)
+
+                # Re-index in ToolRetriever
+                try:
+                    from core.tool_retriever import ToolRetriever
+                    tr = ToolRetriever(self.client)
+                    if old_key and old_key != updated_sig:
+                        tr.delete_tool(old_key)
+                    tr.index_tool(updated_sig, updated_desc, generalizability=generalizability)
+                except Exception as tre:
+                    log_it(f"ToolRetriever re-index failed for '{clean_name}': {tre}", self.entity_name)
+
+                _EMITTER.log({
+                    "target_name": clean_name,
+                    "builder_type": "tool_update",
+                    "latency_ms": latency_ms,
+                    "status": "passed",
+                    "attempt_count": attempt,
+                    "failure_reason": "none",
+                    "debugger_prior_used": ref_context != "",
+                    "input_tokens": len(prompt) // 4,
+                    "output_tokens": len(updated_code) // 4,
+                })
+
+                try:
+                    self.memory.write_fix(
+                        clean_name,
+                        "Tool updated with requested changes",
+                        f"Updated signature: {updated_sig}. Changes: {requested_changes}",
+                    )
+                except Exception as me:
+                    log_it(f"Failed to record memory in ToolBuilder.update_tool: {me}", self.entity_name)
+
+                return generalizability
+
+            tb = str(result)
+            log_it(
+                f"Updated tool '{clean_name}' failed test (attempt {attempt}/{self.MAX_RETRIES}): {tb}",
+                self.entity_name,
+            )
+            if attempt == self.MAX_RETRIES:
+                break
+
+            mavis_status(f"Updated tool test failed (attempt {attempt}/{self.MAX_RETRIES}). Retrying with LLM fix...")
+            current_code_on_disk = open(f"tools/{clean_name}.py", "r", encoding="utf-8").read()
+            updated_code = self.debug_tool(updated_sig, updated_desc, current_code_on_disk, tb)
+            attempt += 1
+
+        latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+        _EMITTER.log({
+            "target_name": clean_name,
+            "builder_type": "tool_update",
+            "latency_ms": latency_ms,
+            "status": "failed",
+            "attempt_count": attempt,
+            "failure_reason": str(tb)[:100],
+            "debugger_prior_used": ref_context != "",
+            "input_tokens": len(prompt) // 4,
+            "output_tokens": 0,
+        })
+        self._mark_needs_manual_fix(clean_name)
+        raise ToolBuildError(f"Updated tool '{clean_name}' failed all {self.MAX_RETRIES} debug attempts.")
+
     def debug_tool(
+
         self,
         func_sig: str,
         func_desc: str,

@@ -231,3 +231,71 @@ Output ONLY valid JSON in this exact structure — no markdown fences, no extra 
 
 agent_builder_prompt = cognitive_builder_prompt
 agent_debugger_prompt = cognitive_debugger_prompt
+
+
+# ── 5. Agent Updaters (In-Place Evolution) ────────────────────────────────────
+
+cognitive_updater_prompt = """
+Your task is to update an existing stateless CognitiveNode module in MAVIS based on requested modifications.
+The agent executes 1-shot in-memory semantic transformations, extractions, or analyses.
+
+CRITICAL INVARIANTS:
+1. Retain backward compatibility: existing input schema fields must remain supported. Any new fields should have defaults or be optional.
+2. `run(self, turn_id: str = "", **inputs) -> tuple[int, Any]` must always return `(status: int, result: Any)` where 0 is success and -1 is failure.
+3. Pure in-memory processing only. Do NOT import `subprocess`, `socket`, `requests`, or interact directly with filesystem.
+4. Class name must be PascalCase `{class_name}` and subclass `CognitiveNode`.
+
+Output ONLY valid JSON in this exact structure — no markdown fences:
+{{
+  "code": "<the complete python module as a single string, using \\n for newlines>",
+  "updated_description": "A concise description of the updated agent.",
+  "updated_input_schema": {{ ... }},
+  "updated_output_schema": {{ ... }},
+  "generalizability": "specialized" | "repurposable" | "generalizable"
+}}
+
+Agent Name: {agent_name}
+Current Description: {current_description}
+Current Input Schema: {current_input_schema}
+Current Output Schema: {current_output_schema}
+Current Code:
+{current_code}
+
+Requested Modifications:
+{requested_changes}
+"""
+
+subagent_updater_prompt = """
+Your task is to update an existing bounded ReAct Subagent module in MAVIS based on requested modifications.
+The subagent operates in a bounded ReAct loop (Think -> Act -> Observe).
+
+CRITICAL INVARIANTS:
+1. Retain backward compatibility for existing input schema fields.
+2. Class name must be PascalCase `{class_name}` and subclass `Subagent`.
+3. Update `system_instruction`, `allowed_tools`, `default_max_turns`, or schemas as requested.
+4. Output must return `tuple[int, Any]`.
+
+Output ONLY valid JSON in this exact structure — no markdown fences:
+{{
+  "code": "<the complete python module as a single string, using \\n for newlines>",
+  "updated_description": "A concise description of the updated subagent.",
+  "updated_input_schema": {{ ... }},
+  "updated_output_schema": {{ ... }},
+  "default_max_turns": {default_max_turns},
+  "allowed_tools": {allowed_tools},
+  "generalizability": "specialized" | "repurposable" | "generalizable"
+}}
+
+Agent Name: {agent_name}
+Current Description: {current_description}
+Current Input Schema: {current_input_schema}
+Current Output Schema: {current_output_schema}
+Current Allowed Tools: {current_allowed_tools}
+Current Max Turns: {current_max_turns}
+Current Code:
+{current_code}
+
+Requested Modifications:
+{requested_changes}
+"""
+

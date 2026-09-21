@@ -298,7 +298,7 @@ Every tool in MAVIS ALWAYS returns a 2-element tuple: `(status_code: int, result
 
 The test function must:
 1. Use ONLY pytest for writing tests (follow pytest conventions and standard assert statements).
-2. Be named `test_<func_name>` (replace <func_name> with the actual function name from the signature) and take no arguments: `def test_<func_name>():`.
+2. Be named `test_<func_name>` (replace <func_name> with the actual function name from the signature) and take no arguments: `def test_<func_name>():`. Do NOT use pytest fixtures in the signature (do not take arguments like `tmp_path`, `tmpdir`, or `monkeypatch`). If temporary files are needed, create them inside the test using Python's built-in `tempfile` module (e.g. `with tempfile.TemporaryDirectory() as tmpdir:`) or clean them up manually.
 3. Import the function: `from tools.<func_name> import <func_name>`. You may `import pytest` if needed.
 4. Call the function with sensible, realistic test inputs that are likely to succeed.
 5. Verify the return value is a 2-element tuple where 1st element is integer status using `assert`:
@@ -356,4 +356,83 @@ Broken implementation:
 
 Test failure traceback:
 {error_traceback}
+"""
+
+tool_updater_prompt = """
+Your task is to update an existing Python tool function in MAVIS based on requested modifications.
+Avoid creating sub-functions as much as possible. You can use public APIs if needed.
+
+CRITICAL BACKWARD-COMPATIBILITY INVARIANTS:
+1. Retain existing parameter names and positional order.
+2. ANY NEW PARAMETERS MUST HAVE DEFAULT VALUES (keyword arguments with sensible defaults, e.g. `param: type = default_value`) so existing callers and DAG pipelines do not break.
+3. INTERNAL EXECUTION CONTRACT: Regardless of signature annotations, runtime return value MUST ALWAYS be a 2-element tuple: (status_code, result).
+   - Return `0, result` on success.
+   - Return `-1, error_message_str` on failure.
+4. Any API keys must be loaded using `os.getenv()`.
+5. SECURITY RULES:
+   - For ALL OS-level/shell commands, use: `from oni import call_shell`
+   - For ALL filesystem operations, use: `from oni import call_fs`
+   - For ALL outbound network requests, use: `from oni import call_network`
+   - DO NOT import `subprocess`, `socket`, or use `os.system`.
+6. Classify "generalizability" as exactly one of: "generalizable", "repurposable", "specialized".
+
+Follow the JSON output format exactly:
+{{
+    "requirements": [package1, package2],
+    "env": [VAR_1, VAR_2],
+    "generalizability": "generalizable",
+    "code": "The complete updated function code as a string",
+    "updated_signature": "func_name(existing_params, new_param: type = default) -> tuple[int, return_type]",
+    "updated_description": "Updated function description"
+}}
+
+Existing Tool Name:
+{tool_name}
+
+Current Function Signature:
+{current_signature}
+
+Current Function Description:
+{current_description}
+
+Current Code:
+{current_code}
+
+Requested Modifications:
+{requested_changes}
+"""
+
+tool_updater_tester_prompt = """
+Your task is to update or write a self-contained pytest test function for an updated Python function in MAVIS.
+
+MANDATORY RETURN TYPE CONVENTION:
+Every tool in MAVIS ALWAYS returns a 2-element tuple: `(status_code: int, result: Any)`.
+- status_code: 0 for success, -1 for failure.
+- result: The payload returned by the function.
+
+The test function must:
+1. Use ONLY pytest conventions and standard assert statements.
+2. Be named `test_{func_name}` and take no arguments: `def test_{func_name}():`. Do NOT use pytest fixtures in the signature (do not take arguments like `tmp_path`, `tmpdir`, or `monkeypatch`). If temporary files are needed, create them inside the test using Python's built-in `tempfile` module.
+3. Import the function: `from tools.{func_name} import {func_name}`.
+4. Test both the backward-compatible behavior (calling with original parameters) AND the updated behavior (exercising the newly requested functionality).
+5. Verify `status == 0` using `assert status == 0, f"Expected status 0, got {{status}}: {{result}}"`.
+6. Clean up temporary resources if created.
+7. Use ONLY pytest. Do not use `unittest`.
+
+Output ONLY valid JSON:
+{{
+  "code": "<the complete test function as a single string, with newlines as \\n>"
+}}
+
+Function Name:
+{func_name}
+
+Updated Signature:
+{updated_signature}
+
+Updated Description:
+{updated_description}
+
+Updated Function Code:
+{updated_code}
 """
