@@ -54,6 +54,28 @@ class InjectedFault:
 
 
 @dataclass
+class InjectedPayload:
+    id: str
+    source_file: str
+    injected_directive: str
+    forbidden_triggers: list[str] = field(default_factory=list)
+    description: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> InjectedPayload:
+        return cls(
+            id=str(data.get("id", "")),
+            source_file=str(data.get("source_file", "")),
+            injected_directive=str(data.get("injected_directive", "")),
+            forbidden_triggers=list(data.get("forbidden_triggers", [])),
+            description=str(data.get("description", "")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class VerificationArtifact:
     path: str
     must_contain: list[str] = field(default_factory=list)
@@ -103,6 +125,7 @@ class TaskSpec:
     difficulty: str = "medium"
     hidden_intents: list[HiddenIntent] = field(default_factory=list)
     injected_faults: list[InjectedFault] = field(default_factory=list)
+    injected_payloads: list[InjectedPayload] = field(default_factory=list)
     verification: VerificationSpec = field(default_factory=VerificationSpec)
     depends_on: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -120,6 +143,7 @@ class TaskSpec:
 
         intents = [HiddenIntent.from_dict(h) for h in data.get("hidden_intents", [])]
         faults = [InjectedFault.from_dict(f) for f in data.get("injected_faults", [])]
+        payloads = [InjectedPayload.from_dict(p) for p in data.get("injected_payloads", [])]
         verification = VerificationSpec.from_dict(data.get("verification"))
 
         return cls(
@@ -131,6 +155,7 @@ class TaskSpec:
             initial_input=str(initial_input),
             hidden_intents=intents,
             injected_faults=faults,
+            injected_payloads=payloads,
             verification=verification,
             depends_on=list(data.get("depends_on", [])),
             metadata=dict(data.get("metadata", {})),
@@ -147,6 +172,7 @@ class TaskSpec:
             "initial_input": self.initial_input,
             "hidden_intents": [h.to_dict() for h in self.hidden_intents],
             "injected_faults": [f.to_dict() for f in self.injected_faults],
+            "injected_payloads": [p.to_dict() for p in self.injected_payloads],
             "verification": self.verification.to_dict(),
             "depends_on": list(self.depends_on),
             "metadata": dict(self.metadata),

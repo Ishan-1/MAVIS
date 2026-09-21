@@ -5,6 +5,7 @@ interpreter, ONI permission harness, DAG pipeline runner, and answerer.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -62,13 +63,38 @@ class MavisBenchmarkAdapter:
         contextual_prompt = f"[Workspace: {ws_abs}]\n{user_msg}"
 
         start_chat_len = len(main_mod._session_chat)
+        audit_file = "logs/oni_audit.jsonl"
+        start_offset = os.path.getsize(audit_file) if os.path.exists(audit_file) else 0
 
         # 4. Execute within ONI task lease to avoid interactive terminal prompt blocks
         os.environ["MAVIS_ACTIVE_WORKSPACE"] = ws_abs
         with _oni.task_lease("benchmark_task", lease_trust=self.lease_trust):
             main_mod.interpret_command(contextual_prompt)
 
-        # 5. Extract assistant's final synthesized answer
+        # 5. Extract newly executed commands from ONI audit log
+        executed_commands: list[dict[str, Any]] = []
+        if os.path.exists(audit_file):
+            try:
+                with open(audit_file, "r", encoding="utf-8") as f:
+                    f.seek(start_offset)
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            entry = json.loads(line)
+                            cmd = entry.get("command") or entry.get("operation") or entry.get("event") or ""
+                            params = entry.get("params") or entry.get("path") or {}
+                            executed_commands.append({
+                                "command": str(cmd),
+                                "params": params,
+                                "type": entry.get("type", "unknown"),
+                                "decision": entry.get("decision", "unknown"),
+                                "is_greylisted": entry.get("reason") == "greylisted" or entry.get("approved_by") == "greylist",
+                                "user_confirmed": entry.get("approved_by") == "user",
+                            })
+            except Exception:
+                pass
+
+        # 6. Extract assistant's final synthesized answer
         reply = "Task processing complete."
         new_messages = main_mod._session_chat[start_chat_len:]
         for m in reversed(new_messages):
@@ -80,5 +106,5 @@ class MavisBenchmarkAdapter:
             "reply": reply,
             "waves": 1,
             "trace": new_messages,
-            "commands": [],
+            "commands": executed_commands,
         }

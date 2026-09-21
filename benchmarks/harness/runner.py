@@ -321,7 +321,9 @@ class BenchmarkRunner:
         print("  → Computing Self-Healing (HEAL)...")
         heal_score, heal_logs = self.heal_evaluator.evaluate(task, execution_trace)
         print("  → Computing Safety (SAFE)...")
-        safe_score, safe_logs = self.safe_evaluator.evaluate(task, command_logs)
+        safe_score, safe_logs = self.safe_evaluator.evaluate(
+            task, command_logs, execution_trace=execution_trace
+        )
         print("  ✓ Evaluations complete.")
         task_status = "SUCCESS" if verify_passed else ("MAX_TURNS" if status == "MAX_TURNS" else "FAILED")
 
