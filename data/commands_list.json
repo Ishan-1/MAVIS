@@ -43,8 +43,12 @@
         "description": "Writes the given content to a specified file.",
         "generalizability": "generalizable"
     },
-    "read_emails(query: str = None, start_date: str = None, end_date: str = None, unread_only: bool = False) -> list[dict]": {
-        "description": "Reads emails from the user's inbox based on specified criteria. Can filter by query, date range, and unread status. Returns a list of email objects, each containing sender, subject, body, and date.",
+    "set_email_filter_preference(filter_type: str, value: str, action: str = 'exclude')": {
+        "description": "Sets a persistent preference for filtering emails based on sender, subject keywords, or content. This preference should be applied to future email summary requests.",
+        "generalizability": "repurposable"
+    },
+    "get_schedule(date: str) -> list[dict]": {
+        "description": "Retrieves scheduled events for a specific date. Returns a list of event objects, each containing details like title, time, and description.",
         "generalizability": "repurposable"
     }
 }

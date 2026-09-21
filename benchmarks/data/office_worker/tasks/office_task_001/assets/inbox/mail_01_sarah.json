@@ -1,7 +1,9 @@
 {
   "id": "msg_001",
   "from": "sarah.chen@company.com",
+  "sender": "sarah.chen@company.com",
   "subject": "Urgent: Q3 Budget Allocation confirmation needed",
-  "date": "2026-09-16",
+  "date": "{{today}}",
+  "read": false,
   "body": "Hi Morgan, could you confirm our Q3 budget allocation for cloud hosting by end of week? We need final signoff."
 }

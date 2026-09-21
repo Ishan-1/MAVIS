@@ -77,6 +77,13 @@ def classify_fs_write(path: str, config: ONIConfig, trust_level: str) -> Decisio
         if norm_path == os.path.normpath(allowed_file):
             return "allow"
 
+    # Active workspace allowance
+    active_ws = os.environ.get("MAVIS_ACTIVE_WORKSPACE")
+    if active_ws:
+        norm_ws = os.path.normpath(active_ws)
+        if norm_path == norm_ws or norm_path.startswith(norm_ws + os.sep):
+            return "allow"
+
     # Directory-prefix allowances
     for approved_dir in config.approved_fs_write_paths:
         norm_approved = os.path.normpath(approved_dir)

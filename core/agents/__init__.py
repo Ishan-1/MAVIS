@@ -14,10 +14,10 @@ from core.helpers import log_it
 _ENTITY = "agent_loader"
 
 
-def load_agent(agent_name: str, client: BaseLLMClient) -> Optional[BaseAgent]:
+def load_agent_with_error(agent_name: str, client: BaseLLMClient) -> tuple[Optional[BaseAgent], Optional[str]]:
     """
     Dynamically load an agent instance by name from the agents/ directory.
-    Looks for a BaseAgent subclass in agents.<agent_name>.
+    Returns (agent_instance, error_message).
     """
     clean_name = agent_name.strip().lower()
     module_path = f"agents.{clean_name}"
@@ -28,18 +28,28 @@ def load_agent(agent_name: str, client: BaseLLMClient) -> Optional[BaseAgent]:
         else:
             module = importlib.import_module(module_path)
 
-        # Look for a class subclassing BaseAgent
         for attr_name in dir(module):
             attr = getattr(module, attr_name)
             if isinstance(attr, type) and issubclass(attr, BaseAgent) and attr not in (BaseAgent, CognitiveNode, Subagent):
-                return attr(client)
+                return attr(client), None
 
-        log_it(f"No BaseAgent subclass found in {module_path}", _ENTITY)
-        return None
+        msg = f"No BaseAgent subclass found in {module_path}"
+        log_it(msg, _ENTITY)
+        return None, msg
     except Exception as e:
-        log_it(f"Failed to load agent '{agent_name}': {e}", _ENTITY)
-        return None
+        msg = f"{type(e).__name__}: {e}"
+        log_it(f"Failed to load agent '{agent_name}': {msg}", _ENTITY)
+        return None, msg
 
 
-__all__ = ["BaseAgent", "CognitiveNode", "Subagent", "load_agent"]
+def load_agent(agent_name: str, client: BaseLLMClient) -> Optional[BaseAgent]:
+    """
+    Dynamically load an agent instance by name from the agents/ directory.
+    Looks for a BaseAgent subclass in agents.<agent_name>.
+    """
+    instance, _ = load_agent_with_error(agent_name, client)
+    return instance
+
+
+__all__ = ["BaseAgent", "CognitiveNode", "Subagent", "load_agent", "load_agent_with_error"]
 

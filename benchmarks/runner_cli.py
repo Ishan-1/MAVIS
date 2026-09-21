@@ -99,6 +99,9 @@ async def main_async() -> int:
     mavis_runner_fn = None
     llm_client = None
     if not args.dry_run:
+        from memories.memory_store import clear_all_working_memories
+        clear_all_working_memories()
+
         from benchmarks.harness.mavis_adapter import MavisBenchmarkAdapter
         adapter = MavisBenchmarkAdapter()
         mavis_runner_fn = adapter.execute_turn
@@ -137,12 +140,17 @@ async def main_async() -> int:
     )
 
     print(f"\n[MAVIS-Bench] Executing episode(s) for: {', '.join(target_personas)}")
+    all_episodes_passed = True
     for persona in target_personas:
         print(f"\n>>> Running Episode: {persona}")
         ep_result = await runner.run_episode(persona)
-        print(f"Finished {persona}: Composite Score = {ep_result.overall_score:.3f} (COMP: {ep_result.overall_comp:.2f}, PROC: {ep_result.overall_proc:.2f})")
+        ep_passed = all(t.verification_passed for t in ep_result.task_results)
+        if not ep_passed:
+            all_episodes_passed = False
+        outcome = "PASSED" if ep_passed else "FAILED"
+        print(f"Finished {persona}: [{outcome}] Composite Score = {ep_result.overall_score:.3f} (COMP: {ep_result.overall_comp:.2f}, PROC: {ep_result.overall_proc:.2f})")
 
-    return 0
+    return 0 if all_episodes_passed else 1
 
 
 def main() -> None:

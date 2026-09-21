@@ -58,6 +58,21 @@ class ONI:
             except Exception:
                 pass
 
+        env_trust = os.environ.get("MAVIS_TRUST_LEVEL")
+        if env_trust:
+            self.set_context_trust(env_trust)
+            self.config.trust_level = env_trust
+
+        env_paths = os.environ.get("MAVIS_APPROVED_FS_WRITE_PATHS")
+        if env_paths:
+            try:
+                paths = json.loads(env_paths)
+                for p in paths:
+                    if p not in self.config.approved_fs_write_paths:
+                        self.config.approved_fs_write_paths.append(p)
+            except Exception:
+                pass
+
         log_it(
             f"ONI initialised. Trust level: {self.config.trust_level}",
             _ENTITY,
@@ -84,16 +99,18 @@ class ONI:
         """
         _thread_local.trust_level = level
 
-    def acquire_task_lease(self, task_name: str, lease_trust: str = "yolo") -> str | None:
+    def acquire_task_lease(self, task_name: str, lease_trust: str = "yolo") -> tuple[str | None, str]:
         """
         Acquire a scoped execution lease for a multi-step autonomous task.
-        Sets thread-local trust to lease_trust (default 'yolo') so that
-        autonomous operations can execute without prompt interruption.
+        Sets both thread-local trust and config trust so that worker threads
+        (e.g. in DAG ThreadPoolExecutor) inherit the lease trust.
         """
-        prev_trust = getattr(_thread_local, "trust_level", None)
+        prev_thread_trust = getattr(_thread_local, "trust_level", None)
+        prev_global_trust = self.config.trust_level
         self.set_context_trust(lease_trust)  # type: ignore[arg-type]
+        self.config.trust_level = lease_trust  # type: ignore[assignment]
         log_it(
-            f"Acquired task lease for '{task_name}' (trust: {lease_trust}, prev: {prev_trust})",
+            f"Acquired task lease for '{task_name}' (trust: {lease_trust}, prev: {prev_thread_trust})",
             _ENTITY,
         )
         record({
@@ -101,23 +118,34 @@ class ONI:
             "event": "acquire_task_lease",
             "task_name": task_name,
             "lease_trust": lease_trust,
-            "prev_trust": prev_trust,
+            "prev_trust": prev_thread_trust,
         })
-        return prev_trust
+        return (prev_thread_trust, prev_global_trust)
 
-    def release_task_lease(self, task_name: str, prev_trust: str | None = None) -> None:
+    def release_task_lease(self, task_name: str, prev: tuple[str | None, str] | str | None = None) -> None:
         """Release the task-scoped lease and restore the previous trust context."""
-        if prev_trust is not None:
-            self.set_context_trust(prev_trust)  # type: ignore[arg-type]
+        prev_thread_trust = None
+        prev_global_trust = None
+        if isinstance(prev, tuple) and len(prev) == 2:
+            prev_thread_trust, prev_global_trust = prev
+        elif isinstance(prev, str):
+            prev_thread_trust = prev
+
+        if prev_thread_trust is not None:
+            self.set_context_trust(prev_thread_trust)  # type: ignore[arg-type]
         else:
             if hasattr(_thread_local, "trust_level"):
                 delattr(_thread_local, "trust_level")
-        log_it(f"Released task lease for '{task_name}' (restored: {prev_trust})", _ENTITY)
+
+        if prev_global_trust is not None:
+            self.config.trust_level = prev_global_trust  # type: ignore[assignment]
+
+        log_it(f"Released task lease for '{task_name}' (restored: {prev_thread_trust})", _ENTITY)
         record({
             "type": "lease",
             "event": "release_task_lease",
             "task_name": task_name,
-            "restored_trust": prev_trust,
+            "restored_trust": prev_thread_trust,
         })
 
     def task_lease(self, task_name: str, lease_trust: str = "yolo"):
@@ -137,6 +165,34 @@ class ONI:
     def _effective_trust(self) -> TrustLevel:
         """Return thread-local override if present, else global trust."""
         return getattr(_thread_local, "trust_level", None) or self.config.trust_level
+
+    # ── Workspace management ──────────────────────────────────────────────────
+
+    def get_active_workspace(self) -> str | None:
+        """Return the absolute path of the currently active workspace, if set."""
+        ws = os.environ.get("MAVIS_ACTIVE_WORKSPACE")
+        if ws and os.path.isdir(ws):
+            return os.path.abspath(ws)
+        return None
+
+    def resolve_path(self, path: str) -> str:
+        """
+        Resolve a filesystem path against the active workspace if one is set.
+        Normalizes prefixes like './', 'workspace/', and './workspace/'.
+        """
+        ws = self.get_active_workspace()
+        if not ws or not isinstance(path, str) or os.path.isabs(path):
+            return path
+
+        norm = path.replace("\\", "/")
+        if norm.startswith("./workspace/"):
+            norm = norm[len("./workspace/"):]
+        elif norm.startswith("workspace/"):
+            norm = norm[len("workspace/"):]
+        elif norm.startswith("./"):
+            norm = norm[2:]
+
+        return os.path.normpath(os.path.join(ws, norm))
 
     # ── Pre-flight scan ───────────────────────────────────────────────────────
 
@@ -387,6 +443,7 @@ class ONI:
             record(audit_entry)
 
         log_it(f"Executing shell: {shell_string}", _ENTITY)
+        active_ws = self.get_active_workspace()
         try:
             result = subprocess.run(
                 shell_string,
@@ -394,6 +451,7 @@ class ONI:
                 capture_output=True,
                 text=True,
                 timeout=self.config.tool_execution_timeout,
+                cwd=active_ws if active_ws else None,
             )
             if result.returncode == 0:
                 return 0, result.stdout.strip()
@@ -499,6 +557,7 @@ class ONI:
         Returns:
             (0, result) on success, (-1, error_message) on denial or failure.
         """
+        path = self.resolve_path(path)
         trust = self._effective_trust()
         params = params or {}
 

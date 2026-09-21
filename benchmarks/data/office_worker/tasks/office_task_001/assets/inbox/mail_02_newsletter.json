@@ -1,7 +1,9 @@
 {
   "id": "msg_002",
   "from": "marketing@saasdaily.com",
+  "sender": "marketing@saasdaily.com",
   "subject": "Top 10 Trends in AI Productivity tools this week",
-  "date": "2026-09-15",
+  "date": "{{today}}",
+  "read": false,
   "body": "Discover the latest updates in generative workspace tooling. Unsubscribe anytime."
 }

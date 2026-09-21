@@ -259,6 +259,14 @@ class MemoryStore:
         with self._lock:
             return [t for t in self._working if t["timestamp"] > since_ts]
 
+    def clear_working_memory(self):
+        """Clear working memory turns in-memory and on disk."""
+        with self._lock:
+            self._working = []
+            self.last_user_input_ts = 0.0
+            self._persist_working_memory_unlocked()
+            log_it(f"Cleared working memory for namespace {self.namespace!r}", _ENTITY)
+
     # ── Public: retrieval ────────────────────────────────────────────────────
 
     def retrieve_context(
@@ -646,3 +654,19 @@ class MemoryStore:
         except Exception as exc:
             log_it(f"Query JSON dir failed: {exc}", _ENTITY)
             return []
+
+
+def clear_all_working_memories():
+    """Scan memories/ and clear working_memory.json across all namespaces."""
+    mem_root = "memories"
+    if not os.path.exists(mem_root):
+        return
+    for root, _, files in os.walk(mem_root):
+        if "working_memory.json" in files:
+            wm_path = os.path.join(root, "working_memory.json")
+            try:
+                with open(wm_path, "w") as f:
+                    json.dump({"last_user_input_ts": 0.0, "working": []}, f)
+                log_it(f"Reset working memory file at {wm_path}", _ENTITY)
+            except Exception as e:
+                log_it(f"Failed to reset {wm_path}: {e}", _ENTITY)

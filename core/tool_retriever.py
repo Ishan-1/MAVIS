@@ -265,3 +265,21 @@ class ToolRetriever:
         except Exception as exc:
             log_it(f"Semantic tool retrieval failed ({exc}), falling back to full registry", _ENTITY)
             return commands_dict
+
+    def delete_tool(self, key_or_name: str) -> bool:
+        """
+        Delete a tool from SQLite registry and purge from in-memory generalizability cache.
+        Returns True if deleted or already absent, False on database error.
+        """
+        tool_id = self._tool_id(key_or_name)
+        self._generalizability_cache.pop(tool_id, None)
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("DELETE FROM tools_registry WHERE func_name = ? OR key = ?", (tool_id, key_or_name))
+                conn.commit()
+            log_it(f"Deleted tool '{tool_id}' from SQLite tools registry", _ENTITY)
+            return True
+        except Exception as exc:
+            log_it(f"Failed to delete tool '{tool_id}' from SQLite: {exc}", _ENTITY)
+            return False
+

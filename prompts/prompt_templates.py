@@ -40,6 +40,9 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
     - `emotion`: frustration, excitement, urgency, sadness, neutral.
     - `emotion_strength`: "low", "medium", or "high".
     - `directive`: boolean (true if user specifies a permanent preference or behavior change).
+8.  **Workspace & File Paths:**
+    - If a workspace context is provided (e.g. `[Workspace: <path>]`), all relative paths (e.g. `CHANGELOG.md`, `pyproject.toml`, `drafts/summary.md`) refer to files within that workspace.
+    - Always use clean relative file paths (e.g. `CHANGELOG.md`, `math_lib.py`, or `drafts/summary.md`) without duplicating `./` prefixes.
 
 **OUTPUT FORMAT:**
 

@@ -21,6 +21,18 @@ class MavisBenchmarkAdapter:
     def __init__(self, lease_trust: str = "yolo") -> None:
         self.lease_trust = lease_trust
         self._mavis_module = None
+        self.clear_working_memory()
+
+    def clear_working_memory(self) -> None:
+        """Clear MAVIS working memory across all namespaces and reset session chat."""
+        from memories.memory_store import clear_all_working_memories
+        clear_all_working_memories()
+
+        main_mod = self._get_mavis()
+        if hasattr(main_mod, "memory_store") and main_mod.memory_store:
+            main_mod.memory_store.clear_working_memory()
+        if hasattr(main_mod, "_session_chat") and isinstance(main_mod._session_chat, list):
+            main_mod._session_chat.clear()
 
     def _get_mavis(self):
         if self._mavis_module is None:
@@ -40,14 +52,11 @@ class MavisBenchmarkAdapter:
         ws_abs = str(workspace_dir.resolve())
 
         # 1. Authorize workspace in ONI approved filesystem write paths
-        cfg_paths = _oni.config.approved_fs_write_paths
-        if ws_abs not in cfg_paths:
-            cfg_paths.append(ws_abs)
-
-        # 2. Add relative workspace prefix if not already present
         ws_rel = os.path.relpath(ws_abs, os.getcwd())
-        if ws_rel not in cfg_paths:
-            cfg_paths.append(ws_rel)
+        cfg_paths = _oni.config.approved_fs_write_paths
+        for p in (ws_abs, ws_rel, "workspace", "./workspace"):
+            if p not in cfg_paths:
+                cfg_paths.append(p)
 
         # 3. Contextualize the prompt with the target workspace so MAVIS tools target it
         contextual_prompt = f"[Workspace: {ws_abs}]\n{user_msg}"
@@ -55,6 +64,7 @@ class MavisBenchmarkAdapter:
         start_chat_len = len(main_mod._session_chat)
 
         # 4. Execute within ONI task lease to avoid interactive terminal prompt blocks
+        os.environ["MAVIS_ACTIVE_WORKSPACE"] = ws_abs
         with _oni.task_lease("benchmark_task", lease_trust=self.lease_trust):
             main_mod.interpret_command(contextual_prompt)
 

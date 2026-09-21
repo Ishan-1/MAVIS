@@ -12,7 +12,7 @@ from typing import Any
 from core.config import cfg
 from core.helpers import log_it
 from core.llm.base import BaseLLMClient
-from core.agents import load_agent
+from core.agents import load_agent, load_agent_with_error
 from agent_builder.tester import AgentTester
 from agent_builder.debugger import AgentDebugger
 from prompts.agent_prompt_templates import cognitive_builder_prompt, subagent_builder_prompt
@@ -194,9 +194,28 @@ class AgentBuilder:
         attempt = 0
         last_failure_reason = "Unknown failure"
         while attempt <= self.MAX_RETRIES:
-            agent_instance = load_agent(clean_name, self.client)
+            agent_instance, load_err = load_agent_with_error(clean_name, self.client)
             if not agent_instance:
-                raise AgentBuildError(f"Could not load generated agent module 'agents/{clean_name}.py'")
+                last_failure_reason = f"Module 'agents/{clean_name}.py' failed to load: {load_err or 'No valid agent class found'}"
+                log_it(
+                    f"Agent '{clean_name}' ({clean_type}) load failure (attempt {attempt}/{self.MAX_RETRIES}): {last_failure_reason}",
+                    _ENTITY,
+                )
+                if attempt == self.MAX_RETRIES:
+                    break
+                current_code = open(f"agents/{clean_name}.py").read()
+                fixed_code, fix_summary = self.debugger.debug_agent(
+                    agent_name=clean_name,
+                    agent_description=agent_description,
+                    broken_code=current_code,
+                    failed_case={"inputs": {}},
+                    actual_output="",
+                    failure_reason=last_failure_reason,
+                    agent_type=clean_type,
+                )
+                self._write_agent_file(clean_name, fixed_code)
+                attempt += 1
+                continue
 
             status, test_result = self.tester.test_agent(
                 agent_instance,

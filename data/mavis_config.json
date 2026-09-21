@@ -52,6 +52,9 @@
         ],
         "tool_execution_timeout_seconds": 30
     },
+    "agentbuilder": {
+        "max_retries": 3
+    },
     "memory": {
         "max_token": 12000,
         "context_window": 1000000,
@@ -63,7 +66,7 @@
         "session_timeout_minutes": 30,
         "emotion_strength_threshold": 0.75,
         "intent_strength_threshold": 0.85,
-        "lt_intent_threshold": 0.90,
+        "lt_intent_threshold": 0.9,
         "working_memory_active_turns": 8,
         "compact_token_threshold": 1500,
         "max_memory_entry_chars": 600,
@@ -102,6 +105,19 @@
         "short_term_worker_interval_minutes": 15,
         "long_term_worker_interval_minutes": 480
     },
+    "output": {
+        "verbosity": "normal",
+        "history_file": "data/.mavis_history",
+        "notify_pipeline_threshold_s": 5
+    },
+    "llm": {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "embedding_model": "text-embedding-004",
+        "temperature": 1.0,
+        "vertexai": true,
+        "base_url": null
+    },
     "mcp": {
         "enabled": true,
         "timeout_seconds": 30,
@@ -109,12 +125,24 @@
             "brave-search": {
                 "enabled": false,
                 "command": "npx",
-                "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+                "args": [
+                    "-y",
+                    "@modelcontextprotocol/server-brave-search"
+                ],
                 "env": {
                     "BRAVE_API_KEY": "${BRAVE_API_KEY}"
                 }
             }
         }
+    },
+    "neo4j": {
+        "enabled": true,
+        "uri": "bolt://localhost:7687",
+        "user": "neo4j",
+        "password": "password",
+        "database": "neo4j",
+        "vector_dimensions": 768,
+        "similarity_threshold": 0.85
     },
     "caching": {
         "enabled": false

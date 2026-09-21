@@ -87,6 +87,7 @@ _session_start_ts = time.time()
 _interpreter_emitter = MetricEmitter("interpreter")
 _dag_emitter = MetricEmitter("dag_execution")
 _dashboard_proc: subprocess.Popen | None = None
+_tooldash_proc: subprocess.Popen | None = None
 
 
 def compute_dag_depth(pipeline: list[dict]) -> int:
@@ -115,6 +116,7 @@ _SLASH_SUBCOMMANDS = {
     "/status": [],
     "/metrics": [],
     "/dashboard": [],
+    "/tooldash": ["tools", "agents", "mcp"],
     "/mcp": ["status", "list", "reload"],
     "/goal": ["--yolo"],
 }
@@ -125,6 +127,7 @@ _COMMAND_METAS = {
     "/status": "Heartbeat, workers, scheduler, memory tokens",
     "/metrics": "Performance, latency, tokens & caching metrics",
     "/dashboard": "Launch local Streamlit web dashboard",
+    "/tooldash": "Launch Tool, Subagent & MCP management dashboard",
     "/config": "Inspect or edit configuration",
     "/trust": "Switch ONI trust level (ask | yolo | whitelist)",
     "/allow": "Add command to ONI whitelist",
@@ -134,6 +137,7 @@ _COMMAND_METAS = {
     "/mcp": "Inspect or manage MCP servers and tools",
     "/goal": "Execute an autonomous multi-wave goal (add --yolo for unattended run)",
 }
+
 
 _SUBCOMMAND_METAS = {
     "/config": {
@@ -255,6 +259,7 @@ _HELP_ROWS = [
     ("/status",                  "Heartbeat, worker PIDs, scheduler tasks, memory usage."),
     ("/metrics",                 "Display performance, latency, token, and cache analytics."),
     ("/dashboard",               "Launch local Streamlit web dashboard in browser."),
+    ("/tooldash",                "Launch Tool, Subagent & MCP management dashboard in browser."),
     ("/config",                  "Print current config."),
     ("/config save",             "Persist config to disk."),
     ("/config reload",           "Reload config from disk."),
@@ -487,6 +492,78 @@ def handle_slash_command(raw: str) -> bool:
                 _safe_open_browser(f"http://localhost:{port}")
         except Exception as e:
             mavis_error(f"Could not launch dashboard: {e}")
+        return True
+
+    # ── /tooldash ─────────────────────────────────────────────────────────────
+    if verb == "/tooldash":
+        import socket
+        import shutil
+        import webbrowser
+
+        port = 8502
+        tooldash_path = os.path.join(_MAV_ROOT, "scripts", "tooldash.py")
+
+        def _is_port_open(p: int) -> bool:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.5)
+                    return s.connect_ex(("127.0.0.1", p)) == 0
+            except Exception:
+                return False
+
+        def _safe_open_browser(url: str) -> None:
+            try:
+                with open(os.devnull, "wb") as null_f:
+                    old_out = os.dup(1)
+                    old_err = os.dup(2)
+                    try:
+                        os.dup2(null_f.fileno(), 1)
+                        os.dup2(null_f.fileno(), 2)
+                        webbrowser.open(url)
+                    finally:
+                        os.dup2(old_out, 1)
+                        os.dup2(old_err, 2)
+                        os.close(old_out)
+                        os.close(old_err)
+            except Exception:
+                pass
+
+        if _is_port_open(port):
+            mavis_ok(f"Tool Studio is already running at [bold cyan]http://localhost:{port}[/bold cyan]")
+            _safe_open_browser(f"http://localhost:{port}")
+            return True
+
+        mavis_status(f"Launching MAVIS Tool Studio on http://localhost:{port} ...")
+        try:
+            venv_streamlit = os.path.join(_MAV_ROOT, "bin", "streamlit")
+            venv_python = os.path.join(_MAV_ROOT, "bin", "python")
+
+            if os.path.exists(venv_streamlit):
+                cmd = [venv_streamlit, "run", tooldash_path, "--server.headless", "true", "--server.port", str(port)]
+            elif os.path.exists(venv_python):
+                cmd = [venv_python, "-m", "streamlit", "run", tooldash_path, "--server.headless", "true", "--server.port", str(port)]
+            elif shutil.which("streamlit"):
+                cmd = [shutil.which("streamlit"), "run", tooldash_path, "--server.headless", "true", "--server.port", str(port)]
+            else:
+                cmd = [sys.executable, "-m", "streamlit", "run", tooldash_path, "--server.headless", "true", "--server.port", str(port)]
+
+            global _tooldash_proc
+            _tooldash_proc = subprocess.Popen(
+                cmd,
+                cwd=_MAV_ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            time.sleep(1.5)
+            if _tooldash_proc.poll() is not None:
+                mavis_error(f"Tool Studio process exited immediately with code {_tooldash_proc.returncode}.")
+            else:
+                mavis_ok(f"Tool Studio running at [bold cyan]http://localhost:{port}[/bold cyan] (PID {_tooldash_proc.pid})")
+                _safe_open_browser(f"http://localhost:{port}")
+        except Exception as e:
+            mavis_error(f"Could not launch Tool Studio: {e}")
         return True
 
     # ── /config ... ───────────────────────────────────────────────────────────
@@ -784,8 +861,14 @@ def call_command(command_name, params_dict):
     """
     env = os.environ.copy()
     env["MAVIS_TOOL_SUBPROCESS"] = "1"
+    env["MAVIS_TRUST_LEVEL"] = str(_oni._effective_trust())
     if hasattr(_oni, "session_allowances") and _oni.session_allowances:
         env["MAVIS_SESSION_ALLOWANCES"] = json.dumps(list(_oni.session_allowances))
+    if hasattr(_oni.config, "approved_fs_write_paths") and _oni.config.approved_fs_write_paths:
+        env["MAVIS_APPROVED_FS_WRITE_PATHS"] = json.dumps(list(_oni.config.approved_fs_write_paths))
+
+    active_ws = _oni.get_active_workspace() or _MAV_ROOT
+    env["MAVIS_ACTIVE_WORKSPACE"] = active_ws
 
     proc = subprocess.Popen(
         [
@@ -799,7 +882,7 @@ def call_command(command_name, params_dict):
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
-        cwd=_MAV_ROOT,
+        cwd=active_ws,
         env=env,
     )
 
@@ -1271,6 +1354,31 @@ def interpret_command(command: str) -> bool:
     ):
         return handle_slash_command("/dashboard")
 
+    # ── Natural language tool studio request check ─────────────────────────────
+    if cleaned_cmd in (
+        "tooldash",
+        "run tooldash",
+        "start tooldash",
+        "launch tooldash",
+        "open tooldash",
+        "show tooldash",
+        "view tooldash",
+        "manage tools",
+        "manage agents",
+        "manage subagents",
+        "manage mcp",
+        "tool dashboard",
+        "tools dashboard",
+        "open tool dashboard",
+        "launch tool dashboard",
+        "open tools dashboard",
+        "launch tools dashboard",
+        "tool studio",
+        "open tool studio",
+    ):
+        return handle_slash_command("/tooldash")
+
+
     turn_id = uuid.uuid4().hex[:8]
     _session_chat.append({
         "role": "user",
@@ -1704,6 +1812,16 @@ if __name__ == "__main__":
                     _dashboard_proc.kill()
         except BaseException:
             pass
+        try:
+            if _tooldash_proc and _tooldash_proc.poll() is None:
+                _tooldash_proc.terminate()
+                try:
+                    _tooldash_proc.wait(timeout=2)
+                except Exception:
+                    _tooldash_proc.kill()
+        except BaseException:
+            pass
+
         try:
             _stop_workers()
         except BaseException:
