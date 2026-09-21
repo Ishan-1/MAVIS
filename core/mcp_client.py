@@ -149,7 +149,7 @@ class MCPServerProcess:
                     cwd=self.cwd,
                 )
             except Exception as e:
-                log_it(_ENTITY, f"Failed to spawn MCP server '{self.name}': {e}", level="ERROR")
+                log_it(f"Failed to spawn MCP server '{self.name}': {e}", _ENTITY, level="ERROR")
                 return False
 
             self._reader_thread = threading.Thread(
@@ -162,13 +162,13 @@ class MCPServerProcess:
         # Perform initialize handshake outside the creation lock
         init_res, err = self._initialize()
         if err:
-            log_it(_ENTITY, f"MCP '{self.name}' initialize failed: {err}", level="ERROR")
+            log_it(f"MCP '{self.name}' initialize failed: {err}", _ENTITY, level="ERROR")
             self.stop()
             return False
 
         self.server_info = init_res.get("serverInfo", {})
         self.is_connected = True
-        log_it(_ENTITY, f"MCP server '{self.name}' connected successfully ({self.server_info}).")
+        log_it(f"MCP server '{self.name}' connected successfully ({self.server_info}).", _ENTITY)
         return True
 
     def _read_loop(self) -> None:
@@ -197,7 +197,7 @@ class MCPServerProcess:
                             event.set()
                 # Handle server-initiated requests or notifications (ignoring roots/sampling for now)
         except Exception as exc:
-            log_it(_ENTITY, f"MCP '{self.name}' reader loop terminated: {exc}", level="DEBUG")
+            log_it(f"MCP '{self.name}' reader loop terminated: {exc}", _ENTITY, level="DEBUG")
         finally:
             self.is_connected = False
 
@@ -391,7 +391,7 @@ class MCPManager:
 
         mcp_cfg = cfg.get("mcp", default={})
         if not isinstance(mcp_cfg, dict) or not mcp_cfg.get("enabled", True):
-            log_it(_ENTITY, "MCP integration is disabled in configuration.")
+            log_it("MCP integration is disabled in configuration.", _ENTITY)
             return
 
         timeout = float(mcp_cfg.get("timeout_seconds", 30.0))
@@ -441,7 +441,7 @@ class MCPManager:
 
                 tools, err = server.list_tools()
                 if err:
-                    log_it(_ENTITY, f"Error listing tools from '{s_name}': {err}", level="ERROR")
+                    log_it(f"Error listing tools from '{s_name}': {err}", _ENTITY, level="ERROR")
                     continue
 
                 for t_name, t_def in tools.items():
@@ -468,8 +468,8 @@ class MCPManager:
                     }
 
             log_it(
-                _ENTITY,
                 f"Discovered {len(self.tool_map)} MCP tool(s) across {len(self.servers)} server(s).",
+                _ENTITY,
             )
             return dict(self.mavis_commands)
 

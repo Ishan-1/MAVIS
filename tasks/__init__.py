@@ -1,17 +1,11 @@
-# tasks/
-# Package for autonomous background task modules.
-# Each task module should expose a zero-argument `run()` function
-# and be registered with the TaskRunner in main.py.
-#
-# Example task module (tasks/my_task.py):
-#
-#   from helpers import log_it
-#
-#   def run():
-#       # ... do work ...
-#       log_it("my_task ran successfully.", "my_task")
-#
-# Example registration in main.py:
-#
-#   from tasks.my_task import run as my_task_run
-#   runner.register(my_task_run, interval_minutes=30, task_name="my_task")
+"""
+tasks/
+Package for autonomous background tasks and daemon worker processes.
+
+Houses background memory consolidation workers:
+  - short_term_worker.py: Promotes high-salience working memories to short-term storage (every 15 min).
+  - long_term_worker.py: Promotes durable knowledge and rules to long-term storage (every 8 hrs).
+  - worker_process.py: Standalone decoupled daemon process managing scheduled worker cycles.
+"""
+from __future__ import annotations
+

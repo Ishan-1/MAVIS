@@ -12,7 +12,7 @@ MAVIS is **LLM provider-agnostic**, supporting cloud models (Google Gemini, Open
 User Input (text)
       │
       ▼
-handle_slash_command()       ← /goal, /config, /status, /trust, /metrics, /mcp, /save
+handle_slash_command()       ← /goal, /status, /metrics, /dashboard, /tooldash, /config, /trust, /mcp, /save
       │  (if standard prompt)
       ▼
 cache_manager.check_cache()  ──► [Cache Hit >0.95] ─────────► Answerer.synthesize() (sub-ms instant reply)
@@ -132,7 +132,7 @@ execute_pipeline()
 
 ### Prerequisites
 - Linux / macOS with Python 3.11+
-- Neo4j 5.0+ (Local Docker or Neo4j Aura cloud instance)
+- Neo4j 5.0+ (*Optional* — MAVIS operates with 100% functionality using local file-backed JSON memory if Neo4j is offline or not installed)
 
 ### Installation
 
@@ -154,11 +154,13 @@ pip install -r requirements.txt
 Create `.env` in the project root:
 
 ```env
-# Primary LLM Provider
-VERTEX_API_KEY="your-gemini-or-vertex-key"
+# Primary LLM Provider (Google Gemini)
+GEMINI_API_KEY="your-gemini-or-vertex-key"
+# Or for OpenAI / compatible providers:
 # OPENAI_API_KEY="your-openai-key"
+# (For local Ollama, no API key is required)
 
-# Neo4j Knowledge Graph
+# Neo4j Knowledge Graph (Optional — falls back to local JSON if not set)
 NEO4J_URI="bolt://localhost:7687"
 NEO4J_USER="neo4j"
 NEO4J_PASSWORD="your-password"
@@ -175,24 +177,29 @@ python main.py
 
 ## Runtime Slash Commands
 
-Control MAVIS dynamically inside the interactive shell:
+Control MAVIS dynamically inside the interactive shell (with automatic popup tab-completion and descriptions):
 
 ```bash
 /help                           # View help and command assistance
-/goal <description>             # Run autonomous multi-wave goal execution until completed
-/status                         # View heartbeats, worker processes, and memory state
-/metrics [session]              # Print terminal performance and latency tables
-/dashboard                      # Launch local Streamlit observability dashboard
+/goal [--yolo] <description>    # Run autonomous multi-wave goal execution (--yolo for unattended run)
+/status                         # View heartbeats, worker processes, scheduler, and memory state
+/metrics [session]              # Print terminal performance, token economics, and latency tables
+/dashboard                      # Launch local Streamlit observability dashboard (http://localhost:8501)
+/tooldash                       # Launch Tool, Subagent & MCP management studio (http://localhost:8502)
 /config                         # Display active configuration table
 /config set llm.provider ollama # Switch active LLM provider (gemini | openai | ollama)
 /config set llm.model llama3.2  # Change active model
 /config save                    # Persist runtime settings to data/mavis_config.json
+/config reload                  # Reload config from disk
+/config audit [N]               # Tail the last N ONI audit log entries
 /mcp status|list|reload         # Inspect, list, or hot-reload external MCP servers & tools
 /trust ask|yolo|whitelist       # Change ONI security trust level
-/allow <tool_name>              # Whitelist tool
-/block <tool_name>              # Blacklist tool
+/allow <tool_name>              # Whitelist tool (skip approval prompts)
+/block <tool_name>              # Blacklist tool (permanently block execution)
+/greylist <tool_name>           # Greylist tool (always prompt for confirmation)
+/unlist <tool_name>             # Remove tool from all ONI permission lists
 /save [filename.md]             # Export conversation session to Markdown
-exit | quit                     # Clean shutdown
+exit | quit                     # Clean, signal-safe shutdown
 ```
 
 ---
@@ -201,9 +208,10 @@ exit | quit                     # Clean shutdown
 
 ```
 MAV/
-├── main.py                     # Interactive shell & orchestrator
-├── core/                       # Core runtime package
+├── main.py                     # Interactive CLI orchestrator & slash command interface
+├── core/                       # Core execution & runtime package
 │   ├── config.py               # Central configuration manager (MAVISConfig)
+│   ├── helpers.py              # Canonical MAV_ROOT, estimate_tokens, log_it, sanitize_delimiter
 │   ├── caching.py              # SQLite semantic pipeline cache
 │   ├── tool_retriever.py       # SQLite categorical tool retriever
 │   ├── mcp_client.py           # Model Context Protocol (MCP) stdio client & schema mapper
@@ -212,23 +220,28 @@ MAV/
 │   ├── pipeline_debugger.py    # Closed-loop live DAG execution debugger & repair
 │   ├── scratchpad.py           # Scratchpad disk offload (>4KB) with head/tail digests
 │   ├── answerer.py             # Presentation layer synthesizing final responses
+│   ├── output.py               # Rich terminal theme, spinners, tables & panels
 │   ├── metrics.py              # CSV telemetry emitter & aggregator
-│   ├── dag.py                  # DAG parsing, topological sorting & branch pruning
+│   ├── dag.py                  # DAG parsing, topological sorting, depth & branch pruning
 │   ├── run_tool.py             # Subprocess sandbox for tool execution
+│   ├── scheduler.py            # Cron & recurring background task scheduler
+│   ├── agents/                 # Base agent contract (BaseAgent) & ReAct subagent harness
 │   └── llm/                    # Provider-agnostic LLM interface (Gemini, OpenAI, Ollama)
-├── tool_builder/               # Autonomous tool builder, tester, & debug loop
-├── agent_builder/              # Cognitive sub-agent builder, Judge tester, & debugger
-├── agents/                     # Built-in and dynamically synthesized sub-agents
+├── tool_builder/               # Autonomous tool builder, tester, & debug loop (tool_builder.py)
+├── agent_builder/              # Cognitive sub-agent builder, Judge tester, & debugger (agent_builder.py)
+├── agents/                     # Built-in and dynamically synthesized cognitive sub-agents
 ├── memories/                   # Topic-subscribed memory subsystem
-│   ├── memory_store.py         # MemoryStore manager & topic subscriptions
+│   ├── memory_store.py         # MemoryStore manager (_MEMORIES_DIR) & topic subscriptions
 │   ├── neo4j_graph.py          # Neo4j property graph & native vector index
 │   ├── knowledge_extractor.py  # Decoupled background knowledge extraction
+│   ├── emotion_classifier.py   # Emotion salience classifier for episodic memory
 │   └── embedding.py            # Vector embedding wrapper & cosine similarity
+├── prompts/                    # System & interpreter prompt templates
 ├── oni/                        # ONI security harness (AST guard, permissions, task leases)
-├── tasks/                      # Background daemons (episodic promotion, consolidation worker)
+├── tasks/                      # Background daemon workers (short_term, long_term, worker_process)
 ├── data/                       # Configs, mcp_servers.json, registries, SQLite databases
 │   └── scratch/                # Automatic disk scratchpad for large step outputs
 ├── docs/                       # Architecture specifications (Memory, Caching, Subagents, ONI)
-├── scripts/                    # Web dashboard (dashboard.py with Turn & Wave Inspector)
-└── tests/                      # Automated test suite (60 unit and integration tests)
+├── scripts/                    # Streamlit web dashboards (dashboard.py, tooldash.py)
+└── tests/                      # Automated test suite (unit and integration tests)
 ```

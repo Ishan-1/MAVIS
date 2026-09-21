@@ -8,7 +8,7 @@ import json
 import time
 from abc import ABC, abstractmethod
 from typing import Any
-from core.helpers import log_it
+from core.helpers import log_it, estimate_tokens
 from core.llm.base import BaseLLMClient
 from core.metrics import MetricEmitter
 
@@ -103,7 +103,7 @@ class BaseAgent(ABC):
             )
 
             is_json = bool(self.output_schema)
-            input_tokens = len(prompt) // 4 + len(self.system_instruction) // 4
+            input_tokens = estimate_tokens(prompt) + estimate_tokens(self.system_instruction)
 
             raw_response = self.client.generate(
                 prompt,
@@ -124,7 +124,7 @@ class BaseAgent(ABC):
                 })
                 return -1, f"Cognitive node '{self.name}' returned an empty response."
 
-            output_tokens = len(raw_response) // 4
+            output_tokens = estimate_tokens(raw_response)
             status_code, result = self._validate_output(raw_response)
             latency_ms = round((time.perf_counter() - t0) * 1000, 2)
 

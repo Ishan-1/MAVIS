@@ -11,7 +11,7 @@ import time
 from typing import Any, Callable
 
 from core.agents.base import BaseAgent, sanitize_delimiter
-from core.helpers import log_it
+from core.helpers import log_it, estimate_tokens
 from core.llm.base import BaseLLMClient
 from core.metrics import MetricEmitter
 from core.scratchpad import spill_if_large
@@ -239,7 +239,7 @@ class Subagent(BaseAgent):
         )
 
         for turn in range(1, effective_cap + 1):
-            turn_in_tokens = len(current_prompt) // 4 + len(system_prompt) // 4
+            turn_in_tokens = estimate_tokens(current_prompt) + estimate_tokens(system_prompt)
             total_input_tokens += turn_in_tokens
 
             try:
@@ -263,7 +263,7 @@ class Subagent(BaseAgent):
                 })
                 return -1, f"Subagent '{self.name}' LLM generation failed at turn {turn}: {exc}"
 
-            turn_out_tokens = len(response) // 4 if response else 0
+            turn_out_tokens = estimate_tokens(response)
             total_output_tokens += turn_out_tokens
 
             # Check for Final Answer

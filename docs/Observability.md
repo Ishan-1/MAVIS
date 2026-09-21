@@ -81,32 +81,41 @@ Every emitted metric row includes an ISO-8601 `timestamp` and a correlating `tur
 ### Metrics Emitted by Component
 
 1. **Interpreter** (`data/metrics/interpreter.csv`)
-   - `timestamp`, `turn_id`, `latency_ms` (time from entry to output), `status` (`direct_response` | `pipeline` | `error`), `input_tokens`, `output_tokens`, `tools_retrieved_count`
+   - `timestamp`, `turn_id`, `latency_ms`, `status` (`direct_response` | `pipeline` | `error`), `input_tokens`, `output_tokens`, `tools_retrieved_count`
 
 2. **Answerer** (`data/metrics/answerer.csv`)
-   - `timestamp`, `turn_id`, `latency_ms` (time from entry to output), `status` (`success` | `error`), `input_tokens`, `output_tokens`
+   - `timestamp`, `turn_id`, `latency_ms`, `status` (`success` | `error`), `input_tokens`, `output_tokens`
 
 3. **DAG Execution Engine** (`data/metrics/dag_execution.csv`)
-   - `timestamp`, `turn_id`, `start_time`, `end_time`, `latency_ms`, `status` (`success` | `node_failed` | `aborted`), `dag_size` (step count), `dag_depth`, `tool_nodes_count`, `subagent_nodes_count`, `failed_node_id`
+   - `timestamp`, `turn_id`, `start_time`, `end_time`, `latency_ms`, `status` (`success` | `node_failed` | `aborted`), `dag_size` (step count), `dag_depth`, `tool_nodes_count`, `cognitive_nodes_count`, `subagent_nodes_count`, `failed_node_id`
 
 4. **CachingManager** (`data/metrics/caching.csv`)
-   - `timestamp`, `turn_id`, `cache_status` (`hit` | `miss`), `hit_tier` (`instant` | `llm_verified` | `miss`), `similarity_score`, `llm_verify_result` (`verified` | `rejected` | `n/a`), `ttl_valid` (`true` | `false`), `latency_ms`, `tokens_saved_estimate`
+   - `timestamp`, `turn_id`, `cache_status` (`hit` | `miss`), `hit_tier` (`instant` | `llm_verified` | `miss`), `similarity_score`, `llm_verify_result` (`verified` | `rejected` | `n/a`), `ttl_valid` (`true` | `false`), `latency_ms`, `tokens_saved_estimate`, `estimated_tokens_saved`
 
 5. **ToolBuilder & AgentBuilder** (`data/metrics/builders.csv`)
    - `timestamp`, `target_name`, `builder_type` (`tool` | `agent`), `latency_ms`, `status` (`passed` | `failed`), `attempt_count` (0 = first pass, 1–3 = debugger retry), `failure_reason` (`ast_violation` | `syntax` | `pytest_fail` | `judge_fail` | `none`), `debugger_prior_used` (`true` | `false`), `input_tokens`, `output_tokens`
 
-6. **Subagents** (`data/metrics/subagents.csv`)
-   - `timestamp`, `turn_id`, `agent_name` (e.g. `semantic_transform`), `latency_ms`, `status` (`success` | `error`), `input_tokens`, `output_tokens`, `payload_truncated` (`true` | `false`)
+6. **Cognitive Nodes** (`data/metrics/cognitive.csv`)
+   - `timestamp`, `turn_id`, `agent_name`, `latency_ms`, `status` (`success` | `error`), `input_tokens`, `output_tokens`, `payload_truncated` (`true` | `false`)
 
-7. **ONI Security Harness** (`data/metrics/oni.csv`)
-   - `timestamp`, `turn_id`, `target_command_or_path`, `phase` (`pre_flight` | `runtime`), `trust_level`, `oni_decision` (`whitelist_allowed` | `greylist_prompted` | `blacklist_blocked`), `user_decision` (`allowed` | `denied` | `n/a`), `dwell_time_ms` (time waiting for user approval)
+7. **ReAct Subagents** (`data/metrics/subagents.csv`)
+   - `timestamp`, `turn_id`, `agent_name`, `latency_ms`, `status` (`success` | `error`), `input_tokens`, `output_tokens`, `turns_count`, `tools_called_count`, `hit_turn_cap` (`true` | `false`)
 
-8. **Memory Manager & Workers** (`data/metrics/memory.csv`)
-   - `timestamp`, `event_type` (`working_turn` | `compaction` | `short_term_worker` | `long_term_worker`), `working_tokens_count`, `compaction_triggered` (`true` | `false`), `tokens_freed`, `turns_evaluated`, `turns_promoted`, `facts_consolidated`
+8. **Tool Usage & Subprocess Execution** (`data/metrics/tool_usage.csv`)
+   - `timestamp`, `turn_id`, `tool_name`, `status` (`0` | `-1`), `latency_ms`, `payload_truncated`, `is_mcp`, `cached`
+
+9. **Gate & Control Node Evaluator** (`data/metrics/gate_evaluator.csv`)
+   - `timestamp`, `turn_id`, `node_id`, `gate_type`, `mode` (`ast` | `nlp`), `condition`, `result` (`true` | `false`), `latency_ms`, `input_tokens`, `output_tokens`, `pruned_nodes_count`
+
+10. **Autonomous Goal Runner** (`data/metrics/goal_runner.csv`)
+    - `timestamp`, `goal_id`, `wave_index`, `dag_size`, `nodes_succeeded`, `nodes_failed`, `latency_ms`, `status`, `input_tokens`, `output_tokens`
+
+11. **Memory Manager & Workers** (`data/metrics/memory.csv`)
+    - `timestamp`, `event_type` (`working_turn` | `compaction` | `short_term_worker` | `long_term_worker`), `working_tokens_count`, `compaction_triggered` (`true` | `false`), `tokens_freed`, `turns_evaluated`, `turns_promoted`, `facts_consolidated`
 
 ## 4. How to Display Metrics
 
-MAVIS presents metrics in two dedicated interfaces designed for distinct usage contexts: a streamlined **CLI Interface** for real-time awareness during interactive sessions, and a comprehensive **Locally Hosted Web Dashboard** for in-depth historical analysis.
+MAVIS presents metrics in dedicated interfaces designed for distinct usage contexts: a streamlined **CLI Interface** for real-time awareness during interactive sessions, and two **Locally Hosted Web Dashboards** for visual analytics and tool management.
 
 ---
 
@@ -116,41 +125,36 @@ The CLI provides lightweight, immediate feedback without distracting from conver
 
 1. **Persistent Bottom Toolbar**:
    - Integrated into the interactive prompt (`prompt_toolkit`).
-   - Displays real-time session counters: `Session Time` | `Tokens: in/out` | `Cache Hits` | `Memory Pressure (tokens / 12k cap)`.
+   - Displays real-time session counters via `core.metrics.get_metrics_summary`:
+     `[MAVIS v1.0] Session: Xm • Tokens: X in / Y out • Cache Hits: Z • WM: X/12k tokens • Type / for commands`
 
 2. **`/metrics` Slash Command**:
-   - Renders a rich formatted terminal table summarizing recent performance across:
-     - **Session Summary**: Total queries handled, direct response vs pipeline ratio, total session duration.
-     - **Latency**: Average, Median, and Max for end-to-end turns, planning, and execution.
-     - **Token Usage**: Total input/output tokens and component breakdown (`interpreter`, `subagents`, `answerer`, `builders`).
-     - **Semantic Cache**: Hit rate percentage, instant vs LLM-verified hits, and estimated tokens saved.
-     - **Tool & Agent Lifecycle**: Tools reused vs created, build pass rates, and failure counts.
-     - **Security & Memory**: ONI gate approvals/denials, working memory token count, and compaction count.
+   - Renders rich formatted terminal tables (`core.metrics.format_metrics_tables`) summarizing:
+     - **Session Overview**: Total queries, direct responses, pipeline runs, and runtime duration.
+     - **Token Economics & Components**: Input, output, and grand total tokens across Interpreter, Answerer, Cognitive nodes, Subagents, and Builders.
+     - **Latency & Performance**: Average, Median, and Max execution times per subsystem.
+     - **Semantic Caching**: Cache hits, hit rates, and tokens avoided.
+     - **Memory & Security**: Working memory pressure, compaction counts, and active tokens.
 
 3. **Session Exit Summary**:
-   - Printed automatically when exiting MAVIS (`exit`, `quit`, or `Ctrl+C`).
-   - Displays a compact summary card showing session length, total turns, tokens consumed, and cache hit efficiency.
+   - Printed automatically upon clean exit (`exit`, `quit`, or `Ctrl+C`).
+   - Displays a concise summary of tokens used, duration, and caching efficiency.
 
 ---
 
-### B. Locally Hosted Web Dashboard
+### B. Locally Hosted Streamlit Dashboards
 
-A dedicated, lightweight web dashboard for visual and historical analytics:
+1. **MAVIS Local Observability Dashboard (`scripts/dashboard.py`)**:
+   - **Access**: Served at `http://localhost:8501`, launched via `/dashboard` or standalone:
+     ```bash
+     streamlit run scripts/dashboard.py --server.port 8501
+     ```
+   - **Isolated Component Reads by Default**: Panels independently read their isolated CSV files (`caching.csv`, `dag_execution.csv`, `gate_evaluator.csv`, `goal_runner.csv`) to prevent CPU/IO bottlenecks.
+   - **Turn & Goal Wave Inspector**: Dynamically correlates `turn_id` or `goal_id` to render the complete multi-wave DAG waterfall, gate branching decisions, and runtime debugger patches.
 
-1. **Architecture & Data Access Pattern**:
-   - **Local Delivery**: Served locally on `http://localhost:8000` (or configurable port), launched on-demand via the `/dashboard` slash command or standalone script (`python -m core.dashboard`).
-   - **Isolated Component Reads by Default**: To guarantee fast rendering without CPU/IO bottlenecks, all dashboard panels read **only their corresponding CSV file** independently (e.g. Caching panel reads `caching.csv`, Execution panel reads `dag_execution.csv`). No multi-file joins are performed by default.
-   - **Lazy Cross-File Join (On-Demand Turn Inspector)**: Cross-file joining on `turn_id` is performed *only* when the user explicitly clicks a specific turn to inspect its full end-to-end trace and component waterfall.
-
-2. **Dashboard Views & Panels**:
-   - **Component KPI Cards**: Standalone summaries for Interpreter, DAG Engine, Caching, and Builders computed directly from their respective CSVs.
-   - **Latency & Performance Views**: Independent latency timelines per component (Average, Median, Max).
-   - **Token Economics & Cost**: Component-level token consumption curves over time.
-   - **Semantic Caching Performance**: Visual breakdown of similarity score distribution, cache hit tiers (`instant` vs `llm_verified` vs `miss`), and TTL validity.
-   - **DAG & Tool Reliability**: Distribution of DAG step counts/depths, tool synthesis pass vs retry rates, and failure taxonomy breakdown.
-   - **Security & Memory Health**: ONI gate decision history (Allowed vs Denied) and working memory token growth/compaction curves.
-   - **Turn Inspector (Trace View)**: On-demand drill-down that joins rows by `turn_id` across CSVs to display the full lifecycle of a single query.
-
-3. **Interactivity & Controls**:
-   - **Time Filters**: Filter data by `Current Session`, `Last 24 Hours`, `Last 7 Days`, or `All-Time`.
-   - **Live Auto-Refresh**: Configurable poll interval (e.g. 5s) to monitor metrics in real-time while using MAVIS.
+2. **MAVIS Tool Studio (`scripts/tooldash.py`)**:
+   - **Access**: Served at `http://localhost:8502`, launched via `/tooldash` or standalone:
+     ```bash
+     streamlit run scripts/tooldash.py --server.port 8502
+     ```
+   - Provides live visual management, syntax inspection, and status monitoring across registered tools, cognitive subagents, and connected MCP servers.

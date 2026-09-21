@@ -35,9 +35,11 @@ This document persists the architectural decisions, operational conventions, and
 - `call_command()` streams subprocess output line-by-line using non-blocking `selectors` so users see real-time progress during long tasks.
 - Shell commands run via ONI's `call_shell()`.
 
-### D. Observability Dashboard (`scripts/dashboard.py`, `/dashboard`)
-- **Web Dashboard**: Local Streamlit app served at `http://localhost:8501`.
-- **Detached Execution Invariant**: Must always run completely detached:
+### D. Observability Dashboards (`scripts/dashboard.py`, `scripts/tooldash.py`, `/dashboard`, `/tooldash`)
+- **Web Dashboards**:
+  - `/dashboard`: Local Streamlit telemetry app served at `http://localhost:8501`.
+  - `/tooldash`: Tool, Subagent & MCP management studio served at `http://localhost:8502`.
+- **Detached Execution Invariant**: Both dashboards use `_launch_streamlit_app` and must always run completely detached:
   ```python
   subprocess.Popen(
       cmd,
@@ -48,9 +50,9 @@ This document persists the architectural decisions, operational conventions, and
       start_new_session=True,  # Mandatory to avoid TTY conflict with prompt_toolkit
   )
   ```
-- **Interception**: Natural language queries (`run dashboard`, `open dashboard`) and pipeline steps containing `streamlit run` are intercepted and routed to the background daemon rather than running in the foreground.
-- **Active Instance Detection**: Before spawning, check `_is_port_open(8501)` to prevent duplicate exit code 1 failures.
-- **Quiet Browser Opener**: Suppress `xdg-open` lookup noise when attempting to open browsers in headless environments.
+- **Interception**: Natural language queries (`run dashboard`, `open tool studio`) and pipeline steps containing `streamlit run` are intercepted and routed to the background daemon rather than running in the foreground.
+- **Active Instance Detection**: Before spawning, check socket connection (`_is_port_open`) to prevent duplicate exit code 1 failures.
+- **Quiet Browser Opener**: Suppress `xdg-open` lookup noise via file descriptor duplication when attempting to open browsers in headless environments.
 
 ### E. Large Payload Offloading (`core/scratchpad.py`)
 - Tool outputs $> 4,000$ bytes are offloaded to disk at `data/scratch/<turn_id>_<node_id>.<ext>`.
@@ -64,5 +66,17 @@ This document persists the architectural decisions, operational conventions, and
 ---
 
 ## 3. Telemetry & Metrics Files
-- All telemetry writes to isolated single-CSV tables in `data/metrics/` (`caching.csv`, `dag_execution.csv`, `interpreter.csv`, `memory.csv`, `tool_usage.csv`, `gate_evaluator.csv`, `goal_runner.csv`).
+- All telemetry writes to isolated single-CSV tables in `data/metrics/`:
+  - `interpreter.csv`
+  - `answerer.csv`
+  - `dag_execution.csv`
+  - `caching.csv`
+  - `builders.csv`
+  - `cognitive.csv`
+  - `subagents.csv`
+  - `tool_usage.csv`
+  - `gate_evaluator.csv`
+  - `goal_runner.csv`
+  - `memory.csv`
 - Independent CSV reads prevent CPU/IO bottlenecks in the dashboard.
+

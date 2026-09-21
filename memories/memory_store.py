@@ -16,7 +16,7 @@ from typing import Any
 from google import genai
 
 from core.config import cfg
-from core.helpers import log_it
+from core.helpers import log_it, estimate_tokens
 from core.llm import get_llm_client, BaseLLMClient
 from memories.embedding import embed, cosine_similarity
 from core.metrics import MetricEmitter
@@ -79,11 +79,12 @@ def _max_memory_entry_chars() -> int:
     return cfg.memory.get("max_memory_entry_chars", 600)
 
 # ── Path helpers ─────────────────────────────────────────────────────────────
-_BASE = os.path.join(os.path.dirname(__file__))
+_MEMORIES_DIR = os.path.dirname(os.path.abspath(__file__))
+_BASE = _MEMORIES_DIR  # Backward-compatibility alias
 
 
 def _token_count(text: str) -> int:
-    return len(text) // 4
+    return estimate_tokens(text)
 
 
 def _today() -> str:
@@ -129,7 +130,7 @@ class MemoryStore:
                 self.kg = None
 
         # Paths scoped to this namespace
-        self._ns_dir = os.path.join(_BASE, namespace)
+        self._ns_dir = os.path.join(_MEMORIES_DIR, namespace)
         self._st_json = os.path.join(self._ns_dir, "short_term", "json")
         self._lt_json = os.path.join(self._ns_dir, "long_term", "json")
         self._st_cursor = os.path.join(self._ns_dir, "short_term", ".cursor")
@@ -314,7 +315,7 @@ class MemoryStore:
         if extra_namespaces:
             for extra_ns in extra_namespaces:
                 try:
-                    peer_lt_path = os.path.join(_BASE, extra_ns, "long_term", "json")
+                    peer_lt_path = os.path.join(_MEMORIES_DIR, extra_ns, "long_term", "json")
                     if os.path.exists(peer_lt_path):
                         peer_entries = [_truncate(e) for e in self._query_json_dir(peer_lt_path, query_vec, k)]
                         if peer_entries:

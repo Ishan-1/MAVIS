@@ -8,6 +8,7 @@ Design:
   - All previously stored embeddings live inside ChromaDB on disk;
     this module is never called for already-stored memories.
 """
+from __future__ import annotations
 
 from typing import Any
 from core.llm import get_llm_client, BaseLLMClient

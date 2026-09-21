@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any
-from core.helpers import log_it
+from core.helpers import log_it, estimate_tokens
 from core.llm.base import BaseLLMClient
 from core.metrics import MetricEmitter
 
@@ -96,7 +96,7 @@ class Answerer:
         user_prompt_parts.append("Please provide the final response to the user:")
 
         full_prompt = "\n\n".join(user_prompt_parts)
-        input_tokens = len(full_prompt) // 4 + len(system_instruction) // 4
+        input_tokens = estimate_tokens(full_prompt) + estimate_tokens(system_instruction)
 
         try:
             response = self.client.generate(
@@ -106,7 +106,7 @@ class Answerer:
             )
             res_str = response.strip()
             latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-            output_tokens = len(res_str) // 4
+            output_tokens = estimate_tokens(res_str)
 
             _EMITTER.log({
                 "turn_id": turn_id,

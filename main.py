@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dotenv import load_dotenv
 from prompts.prompt_templates import (
     interpreter_prompt,
@@ -10,6 +12,7 @@ from core.llm import get_llm_client
 from core.tool_retriever import ToolRetriever
 from memories.memory_store import MemoryStore
 from memories.emotion_classifier import parse_classifier_fields
+from core.helpers import log_it, estimate_tokens, MAV_ROOT
 from core.output import (
     mavis_answer, mavis_status, mavis_ok, mavis_warn,
     mavis_error, mavis_debug, mavis_print, oni_print, spinner,
@@ -43,7 +46,7 @@ memory_store = MemoryStore(llm, namespace="interpreter")
 pipeline_debugger_mem = MemoryStore(llm, namespace="pipeline_debugger")
 pipeline_debugger = PipelineDebugger(llm, memory_store=pipeline_debugger_mem)
 tool_retriever = ToolRetriever(llm)
-from core.dag import validate_and_sort_dag, resolve_params, compute_pruned_nodes, extract_node_dependencies
+from core.dag import validate_and_sort_dag, resolve_params, compute_pruned_nodes, extract_node_dependencies, compute_dag_depth
 from core.gate_evaluator import evaluate_gate, evaluate_control_node
 from core.scratchpad import spill_if_large
 from core.caching import cache_manager
@@ -81,27 +84,14 @@ if os.path.exists("data/agents_list.json"):
 import uuid
 from core.metrics import MetricEmitter, get_metrics_summary, format_metrics_tables
 
-_MAV_ROOT = os.path.dirname(os.path.abspath(__file__))
+_MAV_ROOT = MAV_ROOT
+_ENTITY = "main"
 _session_chat: list[dict[str, str]] = []
 _session_start_ts = time.time()
 _interpreter_emitter = MetricEmitter("interpreter")
 _dag_emitter = MetricEmitter("dag_execution")
 _dashboard_proc: subprocess.Popen | None = None
 _tooldash_proc: subprocess.Popen | None = None
-
-
-def compute_dag_depth(pipeline: list[dict]) -> int:
-    """Compute the longest critical dependency path in the DAG."""
-    from core.dag import extract_node_dependencies
-    depths: dict[str, int] = {}
-    for node in pipeline:
-        nid = node.get("id", "")
-        deps = extract_node_dependencies(node)
-        if not deps:
-            depths[nid] = 1
-        else:
-            depths[nid] = 1 + max((depths.get(d, 0) for d in deps), default=0)
-    return max(depths.values(), default=1) if depths else 0
 
 # ── Readline tab-completion for slash commands ──────────────────────────────────
 _SLASH_SUBCOMMANDS = {
@@ -238,7 +228,7 @@ def _get_bottom_toolbar():
     now = time.time()
     elapsed_m = int((now - _session_start_ts) / 60)
     wm = memory_store.get_working_memory()
-    wm_tokens = sum(len(t.get("content", "")) // 4 for t in wm)
+    wm_tokens = sum(estimate_tokens(t.get("content", "")) for t in wm)
     wm_cap = cfg.memory.get("max_token", 12000)
 
     summary = get_metrics_summary(_session_start_ts)
@@ -339,6 +329,79 @@ def _oni_list_add(list_name: str, command: str) -> None:
         target.append(command)
 
 
+def _launch_streamlit_app(script_path: str, port: int, app_name: str) -> subprocess.Popen | None:
+    """Launch a Streamlit app detached in background, or open browser if already running."""
+    import socket
+    import shutil
+    import webbrowser
+
+    def _is_port_open(p: int) -> bool:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                return s.connect_ex(("127.0.0.1", p)) == 0
+        except Exception:
+            return False
+
+    def _safe_open_browser(url: str) -> None:
+        try:
+            with open(os.devnull, "wb") as null_f:
+                old_out = os.dup(1)
+                old_err = os.dup(2)
+                try:
+                    os.dup2(null_f.fileno(), 1)
+                    os.dup2(null_f.fileno(), 2)
+                    webbrowser.open(url)
+                finally:
+                    os.dup2(old_out, 1)
+                    os.dup2(old_err, 2)
+                    os.close(old_out)
+                    os.close(old_err)
+        except Exception:
+            pass
+
+    url = f"http://localhost:{port}"
+    if _is_port_open(port):
+        mavis_ok(f"{app_name} is already running at [bold cyan]{url}[/bold cyan]")
+        _safe_open_browser(url)
+        return None
+
+    mavis_status(f"Launching {app_name} on {url} ...")
+    try:
+        venv_streamlit = os.path.join(_MAV_ROOT, "bin", "streamlit")
+        venv_python = os.path.join(_MAV_ROOT, "bin", "python")
+
+        if os.path.exists(venv_streamlit):
+            cmd = [venv_streamlit, "run", script_path, "--server.headless", "true", "--server.port", str(port)]
+        elif os.path.exists(venv_python):
+            cmd = [venv_python, "-m", "streamlit", "run", script_path, "--server.headless", "true", "--server.port", str(port)]
+        elif shutil.which("streamlit"):
+            cmd = [shutil.which("streamlit"), "run", script_path, "--server.headless", "true", "--server.port", str(port)]
+        else:
+            cmd = [sys.executable, "-m", "streamlit", "run", script_path, "--server.headless", "true", "--server.port", str(port)]
+
+        proc = subprocess.Popen(
+            cmd,
+            cwd=_MAV_ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        time.sleep(1.5)
+        if proc.poll() is not None:
+            mavis_error(f"{app_name} process exited immediately with code {proc.returncode}.")
+            return None
+
+        mavis_ok(f"{app_name} running at [bold cyan]{url}[/bold cyan] (PID {proc.pid})")
+        _safe_open_browser(url)
+        return proc
+    except Exception as e:
+        mavis_error(f"Could not launch {app_name}: {e}")
+        log_it(f"Could not launch {app_name}: {e}", _ENTITY, level="ERROR")
+        return None
+
+
 def handle_slash_command(raw: str) -> bool:
     """
     Handle a /command string. Returns True if it was a slash command (so the
@@ -423,147 +486,20 @@ def handle_slash_command(raw: str) -> bool:
 
     # ── /dashboard ────────────────────────────────────────────────────────────
     if verb == "/dashboard":
-        import socket
-        import shutil
-        import webbrowser
-
-        port = 8501
+        global _dashboard_proc
         dashboard_path = os.path.join(_MAV_ROOT, "scripts", "dashboard.py")
-
-        def _is_port_open(p: int) -> bool:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(0.5)
-                    return s.connect_ex(("127.0.0.1", p)) == 0
-            except Exception:
-                return False
-
-        def _safe_open_browser(url: str) -> None:
-            try:
-                with open(os.devnull, "wb") as null_f:
-                    old_out = os.dup(1)
-                    old_err = os.dup(2)
-                    try:
-                        os.dup2(null_f.fileno(), 1)
-                        os.dup2(null_f.fileno(), 2)
-                        webbrowser.open(url)
-                    finally:
-                        os.dup2(old_out, 1)
-                        os.dup2(old_err, 2)
-                        os.close(old_out)
-                        os.close(old_err)
-            except Exception:
-                pass
-
-        if _is_port_open(port):
-            mavis_ok(f"Dashboard is already running at [bold cyan]http://localhost:{port}[/bold cyan]")
-            _safe_open_browser(f"http://localhost:{port}")
-            return True
-
-        mavis_status(f"Launching MAVIS Local Dashboard on http://localhost:{port} ...")
-        try:
-            # Find streamlit binary: check local venv first, then PATH, then sys.executable
-            venv_streamlit = os.path.join(_MAV_ROOT, "bin", "streamlit")
-            venv_python = os.path.join(_MAV_ROOT, "bin", "python")
-
-            if os.path.exists(venv_streamlit):
-                cmd = [venv_streamlit, "run", dashboard_path, "--server.headless", "true", "--server.port", str(port)]
-            elif os.path.exists(venv_python):
-                cmd = [venv_python, "-m", "streamlit", "run", dashboard_path, "--server.headless", "true", "--server.port", str(port)]
-            elif shutil.which("streamlit"):
-                cmd = [shutil.which("streamlit"), "run", dashboard_path, "--server.headless", "true", "--server.port", str(port)]
-            else:
-                cmd = [sys.executable, "-m", "streamlit", "run", dashboard_path, "--server.headless", "true", "--server.port", str(port)]
-
-            global _dashboard_proc
-            _dashboard_proc = subprocess.Popen(
-                cmd,
-                cwd=_MAV_ROOT,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            time.sleep(1.5)
-            if _dashboard_proc.poll() is not None:
-                mavis_error(f"Dashboard process exited immediately with code {_dashboard_proc.returncode}.")
-            else:
-                mavis_ok(f"Dashboard running at [bold cyan]http://localhost:{port}[/bold cyan] (PID {_dashboard_proc.pid})")
-                _safe_open_browser(f"http://localhost:{port}")
-        except Exception as e:
-            mavis_error(f"Could not launch dashboard: {e}")
+        new_proc = _launch_streamlit_app(dashboard_path, 8501, "Dashboard")
+        if new_proc:
+            _dashboard_proc = new_proc
         return True
 
     # ── /tooldash ─────────────────────────────────────────────────────────────
     if verb == "/tooldash":
-        import socket
-        import shutil
-        import webbrowser
-
-        port = 8502
+        global _tooldash_proc
         tooldash_path = os.path.join(_MAV_ROOT, "scripts", "tooldash.py")
-
-        def _is_port_open(p: int) -> bool:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(0.5)
-                    return s.connect_ex(("127.0.0.1", p)) == 0
-            except Exception:
-                return False
-
-        def _safe_open_browser(url: str) -> None:
-            try:
-                with open(os.devnull, "wb") as null_f:
-                    old_out = os.dup(1)
-                    old_err = os.dup(2)
-                    try:
-                        os.dup2(null_f.fileno(), 1)
-                        os.dup2(null_f.fileno(), 2)
-                        webbrowser.open(url)
-                    finally:
-                        os.dup2(old_out, 1)
-                        os.dup2(old_err, 2)
-                        os.close(old_out)
-                        os.close(old_err)
-            except Exception:
-                pass
-
-        if _is_port_open(port):
-            mavis_ok(f"Tool Studio is already running at [bold cyan]http://localhost:{port}[/bold cyan]")
-            _safe_open_browser(f"http://localhost:{port}")
-            return True
-
-        mavis_status(f"Launching MAVIS Tool Studio on http://localhost:{port} ...")
-        try:
-            venv_streamlit = os.path.join(_MAV_ROOT, "bin", "streamlit")
-            venv_python = os.path.join(_MAV_ROOT, "bin", "python")
-
-            if os.path.exists(venv_streamlit):
-                cmd = [venv_streamlit, "run", tooldash_path, "--server.headless", "true", "--server.port", str(port)]
-            elif os.path.exists(venv_python):
-                cmd = [venv_python, "-m", "streamlit", "run", tooldash_path, "--server.headless", "true", "--server.port", str(port)]
-            elif shutil.which("streamlit"):
-                cmd = [shutil.which("streamlit"), "run", tooldash_path, "--server.headless", "true", "--server.port", str(port)]
-            else:
-                cmd = [sys.executable, "-m", "streamlit", "run", tooldash_path, "--server.headless", "true", "--server.port", str(port)]
-
-            global _tooldash_proc
-            _tooldash_proc = subprocess.Popen(
-                cmd,
-                cwd=_MAV_ROOT,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            time.sleep(1.5)
-            if _tooldash_proc.poll() is not None:
-                mavis_error(f"Tool Studio process exited immediately with code {_tooldash_proc.returncode}.")
-            else:
-                mavis_ok(f"Tool Studio running at [bold cyan]http://localhost:{port}[/bold cyan] (PID {_tooldash_proc.pid})")
-                _safe_open_browser(f"http://localhost:{port}")
-        except Exception as e:
-            mavis_error(f"Could not launch Tool Studio: {e}")
+        new_proc = _launch_streamlit_app(tooldash_path, 8502, "Tool Studio")
+        if new_proc:
+            _tooldash_proc = new_proc
         return True
 
     # ── /config ... ───────────────────────────────────────────────────────────
@@ -801,7 +737,7 @@ def _print_status() -> None:
 
     # Working memory
     wm = memory_store.get_working_memory()
-    wm_tokens = sum(len(t.get("content", "")) // 4 for t in wm)
+    wm_tokens = sum(estimate_tokens(t.get("content", "")) for t in wm)
     wm_cap = cfg.memory.get("max_token", 12000)
     print_table([
         ("tokens", f"{wm_tokens} / {wm_cap} cap"),
@@ -1481,7 +1417,7 @@ def interpret_command(command: str) -> bool:
             "turn_id": turn_id,
             "latency_ms": latency_ms,
             "status": "error",
-            "input_tokens": len(user_prompt) // 4 + len(interpreter_system_prompt) // 4,
+            "input_tokens": estimate_tokens(user_prompt) + estimate_tokens(interpreter_system_prompt),
             "output_tokens": 0,
             "tools_retrieved_count": len(active_tools),
         })
@@ -1494,7 +1430,7 @@ def interpret_command(command: str) -> bool:
             "turn_id": turn_id,
             "latency_ms": latency_ms,
             "status": "error",
-            "input_tokens": len(user_prompt) // 4 + len(interpreter_system_prompt) // 4,
+            "input_tokens": estimate_tokens(user_prompt) + estimate_tokens(interpreter_system_prompt),
             "output_tokens": 0,
             "tools_retrieved_count": len(active_tools),
         })
@@ -1502,8 +1438,8 @@ def interpret_command(command: str) -> bool:
         return True
 
     plan_latency_ms = round((time.perf_counter() - t0_plan) * 1000, 2)
-    input_tokens = len(user_prompt) // 4 + len(interpreter_system_prompt) // 4
-    output_tokens = len(response) // 4
+    input_tokens = estimate_tokens(user_prompt) + estimate_tokens(interpreter_system_prompt)
+    output_tokens = estimate_tokens(response)
 
     emotion, emotion_strength, directive = parse_classifier_fields(response_dict)
 
@@ -1827,39 +1763,27 @@ if __name__ == "__main__":
             import traceback
             traceback.print_exc()
     finally:
-        try:
-            if _dashboard_proc and _dashboard_proc.poll() is None:
-                _dashboard_proc.terminate()
+        def _safe_terminate(proc: subprocess.Popen | None, name: str, timeout: float = 2.0) -> None:
+            if proc and proc.poll() is None:
                 try:
-                    _dashboard_proc.wait(timeout=2)
-                except Exception:
-                    _dashboard_proc.kill()
-        except BaseException:
-            pass
-        try:
-            if _tooldash_proc and _tooldash_proc.poll() is None:
-                _tooldash_proc.terminate()
-                try:
-                    _tooldash_proc.wait(timeout=2)
-                except Exception:
-                    _tooldash_proc.kill()
-        except BaseException:
-            pass
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                except Exception as exc:
+                    log_it(f"Error terminating {name}: {exc}", _ENTITY, level="WARN")
 
-        try:
-            _stop_workers()
-        except BaseException:
-            pass
-        try:
-            runner.stop()
-        except BaseException:
-            pass
-        try:
-            mcp_manager.shutdown()
-        except BaseException:
-            pass
-        try:
-            _print_exit_summary()
-        except BaseException:
-            pass
+        def _safe_shutdown_call(name: str, fn) -> None:
+            try:
+                fn()
+            except Exception as exc:
+                log_it(f"Error during {name} shutdown: {exc}", _ENTITY, level="WARN")
+
+        _safe_terminate(_dashboard_proc, "dashboard")
+        _safe_terminate(_tooldash_proc, "tool studio")
+        _safe_shutdown_call("workers", _stop_workers)
+        _safe_shutdown_call("scheduler", runner.stop)
+        _safe_shutdown_call("mcp", mcp_manager.shutdown)
+        _safe_shutdown_call("exit_summary", _print_exit_summary)
         mavis_print("[dim]Goodbye.[/dim]", level="quiet")

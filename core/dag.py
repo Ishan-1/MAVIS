@@ -325,3 +325,17 @@ def resolve_params(params: Any, node_results: dict[str, Any]) -> tuple[Any, str 
         return resolved_dict, None
 
     return params, None
+
+
+def compute_dag_depth(pipeline: list[dict]) -> int:
+    """Compute the longest critical dependency path in the DAG."""
+    depths: dict[str, int] = {}
+    for node in pipeline:
+        nid = node.get("id", "")
+        deps = extract_node_dependencies(node)
+        if not deps:
+            depths[nid] = 1
+        else:
+            depths[nid] = 1 + max((depths.get(d, 0) for d in deps), default=0)
+    return max(depths.values(), default=1) if depths else 0
+

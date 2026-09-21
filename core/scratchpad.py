@@ -68,11 +68,11 @@ def spill_if_large(
     try:
         scratch_file.write_text(content_str, encoding="utf-8")
         log_it(
-            _ENTITY,
             f"Offloaded {byte_len} bytes from step '{node_id}' to scratchpad: {scratch_file}",
+            _ENTITY,
         )
     except Exception as e:
-        log_it(_ENTITY, f"Failed to spill to scratchpad: {e}", level="WARN")
+        log_it(f"Failed to spill to scratchpad: {e}", _ENTITY, level="WARN")
         return raw_output, None
 
     lines = content_str.splitlines()

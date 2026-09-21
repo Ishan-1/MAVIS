@@ -284,9 +284,12 @@ Facts and entity relationships are tagged with hierarchical topics:
 |---|---|---|:---:|
 | **Interpreter** | `["user.*", "env.*", "tooling.*", "agents.*", "debugging.*"]` | `user.profile` | Full Access |
 | **ToolBuilder** | `["env.*", "tooling.*", "debugging.*"]` | `tooling.tools` | ❌ **Hard Blocked** |
-| **ToolDebugger** | `["env.*", "tooling.*", "debugging.*"]` | `debugging.fixes` | ❌ **Hard Blocked** |
+| **Debugger** | `["env.*", "tooling.*", "debugging.*"]` | `debugging.fixes` | ❌ **Hard Blocked** |
 | **AgentBuilder / AgentDebugger** | `["env.*", "agents.*", "debugging.*"]` | `agents.debugging` | ❌ **Hard Blocked** |
 | **PipelineDebugger** | `["env.*", "tooling.*", "agents.*", "debugging.*"]` | `debugging.pipeline_fixes` | ❌ **Hard Blocked** |
+| **Tasks / Background Workers** | `["env.*", "tooling.*", "tasks.*"]` | `tasks.workflow` | ❌ **Hard Blocked** |
+
+*Note*: All namespaces store episodic short-term and long-term catalogs locally within `memories/<namespace>/` relative to `_MEMORIES_DIR`. If Neo4j is offline or unconfigured, `MemoryStore` seamlessly executes 100% of memory queries and promotions using local JSON stores and in-memory cosine similarity without degradation.
 
 #### 2. Hybrid Dense-Graph Retrieval (Single Cypher Query)
 
