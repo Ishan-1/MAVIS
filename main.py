@@ -735,6 +735,7 @@ def _print_config() -> None:
         ("tick_seconds",             sch.get("tick_seconds")),
         ("short_term_interval_min",  sch.get("short_term_worker_interval_minutes")),
         ("long_term_interval_min",   sch.get("long_term_worker_interval_minutes")),
+        ("reflection_interval_min",  sch.get("reflection_worker_interval_minutes")),
     ], title="Scheduler  [dim](restart required to change)[/dim]")
 
     print_table([

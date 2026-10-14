@@ -136,13 +136,14 @@ st.markdown(
 )
 
 # ── Navigation Tabs ──────────────────────────────────────────────────────────
-tab_overview, tab_latency, tab_caching, tab_dag, tab_builders, tab_memory, tab_trace = st.tabs([
+tab_overview, tab_latency, tab_caching, tab_dag, tab_builders, tab_memory, tab_reflection, tab_trace = st.tabs([
     "📊 Overview",
     "⏱ Latency Breakdown",
     "⚡ Caching",
     "🔄 DAG Execution",
     "🛠 Builders & Agents",
     "🧠 Memory & Safety",
+    "💭 Reflection",
     "🔍 Turn Trace Inspector",
 ])
 
@@ -369,7 +370,28 @@ with tab_memory:
 
             st.dataframe(df_oni.tail(20), use_container_width=True)
 
-# ── Tab 7: Turn & Goal Wave Trace Inspector (On-Demand Lazy Join) ─────────────
+# ── Tab 7: Autonomous Reflection ─────────────────────────────────────────────
+with tab_reflection:
+    st.subheader("Autonomous Reflection Cycles")
+    df_refl = load_component_csv("reflection")
+    df_refl = filter_by_time(df_refl, time_cutoff)
+
+    if df_refl.empty:
+        st.info("No reflection cycles recorded yet.")
+    else:
+        committed_n = int((df_refl["committed"].astype(str).str.lower() == "true").sum()) if "committed" in df_refl.columns else 0
+        rc1, rc2, rc3, rc4 = st.columns(4)
+        rc1.metric("Cycles", f"{len(df_refl):,}")
+        rc2.metric("Committed Insights", f"{committed_n}")
+        if "semantic_delta" in df_refl.columns:
+            rc3.metric("Avg Semantic Delta", f"{pd.to_numeric(df_refl['semantic_delta'], errors='coerce').mean():.3f}")
+        if "latency_ms" in df_refl.columns:
+            rc4.metric("Avg Latency", f"{df_refl['latency_ms'].mean():.0f} ms")
+        if "status" in df_refl.columns:
+            st.bar_chart(df_refl["status"].value_counts())
+        st.dataframe(df_refl.tail(50), use_container_width=True)
+
+# ── Tab 8: Turn & Goal Wave Trace Inspector (On-Demand Lazy Join) ─────────────
 with tab_trace:
     st.subheader("🔍 Turn & Goal Wave Trace Inspector (On-Demand Lazy Join)")
     st.caption("Drill down into a single turn or an autonomous multi-wave goal to reconstruct the full end-to-end execution path.")

@@ -12,7 +12,7 @@ MAVIS is **LLM provider-agnostic**, supporting cloud models (Google Gemini, Open
 User Input (text)
       │
       ▼
-handle_slash_command()       ← /goal, /status, /metrics, /dashboard, /tooldash, /config, /trust, /mcp, /save
+handle_slash_command()       ← /goal, /reflect, /status, /metrics, /dashboard, /tooldash, /config, /trust, /mcp, /save
       │  (if standard prompt)
       ▼
 cache_manager.check_cache()  ──► [Cache Hit >0.95] ─────────► Answerer.synthesize() (sub-ms instant reply)
@@ -71,7 +71,7 @@ execute_pipeline()
 - **Decoupled Promotion & Async Extraction**: Background daemons (`tasks/long_term_worker.py`) scan episodic turn deltas and extract structured entity triples asynchronously (`memories/knowledge_extractor.py`), keeping live conversational turns fast.
 - **Hybrid Dense-Graph Retrieval**: Uses Neo4j 5+ native vector indexing (`entity_embeddings`) to find seed entities, then traverses active 1-hop relationships within subscribed topics in a single Cypher query.
 - **Strict Topic Boundaries**:
-  - `interpreter`: Reads `["user.*", "env.*", "tooling.*", "agents.*", "debugging.*"]`, writes `user.profile`.
+  - `interpreter`: Reads `["user.*", "env.*", "tooling.*", "agents.*", "debugging.*", "reflection.*"]`, writes `user.profile`.
   - `toolbuilder`, `agent_debugger`, & `pipeline_debugger`: Read `["env.*", "tooling.*", "agents.*", "debugging.*"]`. **Hard-blocked from `user.*`**, protecting user privacy and eliminating context pollution in code/pipeline generation.
 - **Deterministic Temporal Deduplication**: Functional 1-to-1 predicates (`PREFERS_EDITOR`, `HAS_OS`, `USES_SHELL`) automatically supersede prior active edges (`is_active = false, superseded_at = datetime()`).
 - **Zero-LLM Subagent & Debugger Writes**: ToolBuilder, ToolDebugger, AgentDebugger, and PipelineDebugger register tool capabilities, AST rules, prompt remedies, and runtime DAG parameter repairs directly into Neo4j without extra LLM overhead.
@@ -125,6 +125,11 @@ execute_pipeline()
   - **Google Gemini**: Vertex AI & Gemini Studio (`gemini-2.5-flash`, `text-embedding-004`).
   - **OpenAI Compatible**: Native support for OpenAI, Groq, DeepSeek, and vLLM.
   - **Ollama**: Local offline inference (`llama3.2`, `nomic-embed-text`).
+
+### 10. Autonomous Self-Reflection (`core/reflection/`, `tasks/reflection_worker.py`, `/reflect`)
+- Compute-bounded learning cycles: topic selection (density/variance-gated pivot), triage gate, Generator-vs-Critic exploration loop with sandboxed web/local tools, and semantic-delta novelty check.
+- Insights persist to `memories/reflections/long_term/json/` and, when Neo4j is available, as triples under `reflection.insights` (readable by the interpreter).
+- Runs in a background worker every `scheduler.reflection_worker_interval_minutes` (default 1440), or on demand via `/reflect [seed]`. Tunables live under `reflection` in `data/mavis_config.json`. See `docs/Self-Reflection.md`.
 
 ---
 
@@ -182,6 +187,7 @@ Control MAVIS dynamically inside the interactive shell (with automatic popup tab
 ```bash
 /help                           # View help and command assistance
 /goal [--yolo] <description>    # Run autonomous multi-wave goal execution (--yolo for unattended run)
+/reflect [<seed>]               # Run one autonomous self-reflection cycle
 /status                         # View heartbeats, worker processes, scheduler, and memory state
 /metrics [session]              # Print terminal performance, token economics, and latency tables
 /dashboard                      # Launch local Streamlit observability dashboard (http://localhost:8501)
@@ -218,6 +224,8 @@ MAV/
 │   ├── goal_runner.py          # Autonomous multi-wave goal execution engine
 │   ├── gate_evaluator.py       # Deterministic AST and NLP gate node evaluator
 │   ├── pipeline_debugger.py    # Closed-loop live DAG execution debugger & repair
+│   ├── manager.py              # Tool/agent catalog & registry manager
+│   ├── reflection/             # Autonomous reflection engine (engine, math_utils, prompts, tools_adapter)
 │   ├── scratchpad.py           # Scratchpad disk offload (>4KB) with head/tail digests
 │   ├── answerer.py             # Presentation layer synthesizing final responses
 │   ├── output.py               # Rich terminal theme, spinners, tables & panels
@@ -238,7 +246,7 @@ MAV/
 │   └── embedding.py            # Vector embedding wrapper & cosine similarity
 ├── prompts/                    # System & interpreter prompt templates
 ├── oni/                        # ONI security harness (AST guard, permissions, task leases)
-├── tasks/                      # Background daemon workers (short_term, long_term, worker_process)
+├── tasks/                      # Background daemon workers (short_term, long_term, reflection, worker_process)
 ├── data/                       # Configs, mcp_servers.json, registries, SQLite databases
 │   └── scratch/                # Automatic disk scratchpad for large step outputs
 ├── docs/                       # Architecture specifications (Memory, Caching, Subagents, ONI)

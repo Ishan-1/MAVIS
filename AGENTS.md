@@ -63,6 +63,11 @@ This document persists the architectural decisions, operational conventions, and
 - Emits repair actions (`patch_params`, `replace_node`, or `unrecoverable`).
 - Automatically learns and records fixes into namespaced memory (`memories/pipeline_debugger/`).
 
+### G. Autonomous Reflection (`core/reflection/engine.py`, `tasks/reflection_worker.py`, `/reflect`)
+- Phases: topic selection → triage gate → Generator/Critic loop (sandboxed tools; turn ceiling consolidates evidence) → semantic-delta storage in `memories/reflections/long_term/json/`.
+- Facts are written to Neo4j via `MemoryStore.add_fact` under `reflection.insights` (interpreter subscribes to `reflection.*`).
+- Interval is controlled solely by `scheduler.reflection_worker_interval_minutes`. Tests must not write to real `data/metrics/` (see `tests/conftest.py`).
+
 ---
 
 ## 3. Telemetry & Metrics Files
@@ -78,5 +83,6 @@ This document persists the architectural decisions, operational conventions, and
   - `gate_evaluator.csv`
   - `goal_runner.csv`
   - `memory.csv`
+  - `reflection.csv`
 - Independent CSV reads prevent CPU/IO bottlenecks in the dashboard.
 

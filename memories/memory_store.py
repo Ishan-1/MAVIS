@@ -31,7 +31,7 @@ _METRICS_EMITTER = MetricEmitter("memory")
 
 _DEFAULT_TOPICS = {
     "interpreter": {
-        "read": ["user.*", "env.*", "tooling.*", "agents.*", "debugging.*"],
+        "read": ["user.*", "env.*", "tooling.*", "agents.*", "debugging.*", "reflection.*"],
         "write": "user.profile",
     },
     "toolbuilder": {

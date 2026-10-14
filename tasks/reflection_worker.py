@@ -53,7 +53,7 @@ def run():
     except Exception:
         pass
 
-    log_it("reflection_worker: starting daily autonomous reflection cycle.", _ENTITY)
+    log_it("reflection_worker: starting scheduled autonomous reflection cycle.", _ENTITY)
     try:
         client = get_llm_client()
         engine = ReflectionEngine(client=client, store=_store)

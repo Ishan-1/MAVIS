@@ -104,7 +104,15 @@
     "scheduler": {
         "tick_seconds": 30,
         "short_term_worker_interval_minutes": 15,
-        "long_term_worker_interval_minutes": 480
+        "long_term_worker_interval_minutes": 480,
+        "reflection_worker_interval_minutes": 1440
+    },
+    "reflection": {
+        "enabled": true,
+        "softmax_temperature": 0.7,
+        "triage_threshold": 0.7,
+        "novelty_delta_threshold": 0.25,
+        "max_exploration_turns": 3
     },
     "output": {
         "verbosity": "normal",

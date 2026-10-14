@@ -4,7 +4,7 @@ Standalone worker process for MAVIS background memory tasks.
 Spawned as independent subprocesses by main.py.
 
 Usage:
-    python worker_process.py <short_term|long_term> <interval_minutes>
+    python worker_process.py <short_term|long_term|reflection> <interval_minutes>
 
 Monitors data/.mavis_heartbeat and self-terminates if heartbeat becomes stale (>120s).
 """

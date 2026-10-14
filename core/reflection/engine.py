@@ -324,7 +324,9 @@ class ReflectionEngine:
 
             critic_status = str(critic_data.get("status", "REFINE")).upper()
             critique = str(critic_data.get("critique", ""))
-            synthesis = critic_data.get("synthesis")
+            critic_synthesis = critic_data.get("synthesis")
+            if critic_synthesis and str(critic_synthesis).strip():
+                synthesis = str(critic_synthesis).strip()
 
             log_it(f"[Phase 3] [Iteration {it}] Critic verdict: {critic_status}. Full critique: {critique}", _ENTITY)
 
@@ -352,7 +354,7 @@ class ReflectionEngine:
                 self._notify("Phase 3", f"Critic requested refinement: {critique}")
 
         # If turn limit reached without explicit rejection, consolidate gathered evidence into synthesis
-        if status == "max_turns_exceeded" and history and not synthesis:
+        if status == "max_turns_exceeded" and history:
             self._notify("Phase 3", f"Turn ceiling reached ({max_iterations}). Consolidating gathered evidence into synthesis...")
             try:
                 hist_text = json.dumps(history, indent=2)
@@ -454,9 +456,14 @@ class ReflectionEngine:
             try:
                 from memories.knowledge_extractor import extract_facts_from_turn
                 facts = extract_facts_from_turn(synthesis, self.client)
-                for f in facts:
-                    f["topic"] = "reflection.insights"
-                self.store.kg.insert_facts(facts)
+                for fact in facts:
+                    self.store.add_fact(
+                        subject=fact["subject"],
+                        predicate=fact["predicate"],
+                        obj=fact["object"],
+                        topic="reflection.insights",
+                        is_functional=bool(fact.get("is_functional", False)),
+                    )
             except Exception as exc:
                 log_it(f"Neo4j reflection facts extraction failed: {exc}", _ENTITY)
 
