@@ -428,12 +428,20 @@ def _cmd_reflect(seed: str | None = None) -> None:
             mavis_print(f"\n  [italic]{res.synthesis}[/italic]")
             if res.storage_path:
                 mavis_print(f"\n  [dim]Committed to: {res.storage_path}[/dim]")
+        elif res.status == "rejected":
+            mavis_status("Hypothesis rejected by Critic as dead end.")
+            if res.rejection_reason:
+                mavis_print(f"  [bold red]Critique:[/bold red] {res.rejection_reason}")
         elif res.status == "triaged_out":
             mavis_status(f"Triage Filtered: Topic score ({res.triage_score:.2f}) fell below utility threshold.")
+            if res.triage_rationale:
+                mavis_print(f"  [bold yellow]Rationale:[/bold yellow] [dim]{res.triage_rationale}[/dim]")
         elif res.status == "low_delta":
             mavis_status(f"Novelty Rejection: Insight semantic delta ({res.semantic_delta:.3f}) is redundant with prior knowledge.")
         else:
             mavis_status(f"Reflection cycle finished with status: {res.status}")
+            if res.rejection_reason:
+                mavis_print(f"  [dim]Reason:[/dim] {res.rejection_reason}")
         rule()
     except Exception as exc:
         mavis_error(f"Reflection cycle failed: {exc}")

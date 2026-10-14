@@ -76,7 +76,8 @@ def load_component_csv(component: str) -> pd.DataFrame:
     try:
         df = pd.read_csv(csv_path)
         if "timestamp" in df.columns:
-            df["timestamp_dt"] = pd.to_datetime(df["timestamp"], errors="coerce")
+            # utc=True normalizes mixed naive/aware values into one tz-aware UTC dtype
+            df["timestamp_dt"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
         return df
     except Exception as e:
         st.error(f"Error reading {csv_path.name}: {e}")
@@ -87,7 +88,13 @@ def filter_by_time(df: pd.DataFrame, cutoff: datetime | None) -> pd.DataFrame:
     """Filter DataFrame by timestamp_dt >= cutoff if applicable."""
     if df.empty or cutoff is None or "timestamp_dt" not in df.columns:
         return df
-    return df[df["timestamp_dt"] >= cutoff]
+    cutoff_ts = pd.Timestamp(cutoff)
+    if cutoff_ts.tzinfo is None:
+        cutoff_ts = cutoff_ts.tz_localize("UTC")
+    else:
+        cutoff_ts = cutoff_ts.tz_convert("UTC")
+    ts = pd.to_datetime(df["timestamp_dt"], errors="coerce", utc=True)
+    return df[ts >= cutoff_ts]
 
 
 # ── Sidebar Controls ─────────────────────────────────────────────────────────

@@ -13,7 +13,7 @@ import json
 import os
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
@@ -67,6 +67,9 @@ class ReflectionResult:
     committed: bool = False
     storage_path: Optional[str] = None
     duration_seconds: float = 0.0
+    triage_rationale: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    history: list[dict] = field(default_factory=list)
 
 
 class ReflectionEngine:
@@ -232,6 +235,8 @@ class ReflectionEngine:
 
         status_str = "PASSED" if passed else "REJECTED (Circuit breaker triggered)"
         self._notify("Phase 2", f"Triage score: {score:.2f} ({category}) -> {status_str}")
+        if rationale:
+            log_it(f"[Phase 2] Triage rationale: {rationale}", _ENTITY)
         return passed, score, category, rationale
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -278,6 +283,12 @@ class ReflectionEngine:
             current_hypothesis = gen_data.get("hypothesis", "")
             action_type = gen_data.get("action_type", "conclude")
             action_payload = gen_data.get("action_payload", "")
+            gen_reasoning = gen_data.get("reasoning", "")
+
+            log_it(f"[Phase 3] [Iteration {it}] Hypothesis: '{current_hypothesis}'", _ENTITY)
+            if gen_reasoning:
+                log_it(f"[Phase 3] [Iteration {it}] Generator reasoning: {gen_reasoning}", _ENTITY)
+            log_it(f"[Phase 3] [Iteration {it}] Action: {action_type} -> '{action_payload}'", _ENTITY)
 
             # Execute targeted verification action
             evidence = ""
@@ -285,12 +296,15 @@ class ReflectionEngine:
                 self._notify("Phase 3", f"Targeted web search: '{action_payload}'")
                 s_code, evidence = search_web_sandboxed(action_payload, max_results=3)
                 web_count += 1
+                log_it(f"[Phase 3] [Iteration {it}] Web search status={s_code}, returned {len(evidence)} chars", _ENTITY)
             elif action_type == "local_read":
                 self._notify("Phase 3", f"Local inspection: '{action_payload}'")
                 s_code, evidence = read_local_context(action_payload)
                 local_count += 1
+                log_it(f"[Phase 3] [Iteration {it}] Local read status={s_code}, returned {len(evidence)} chars", _ENTITY)
             else:
                 evidence = f"Generator submitted conclusion: {action_payload}"
+                log_it(f"[Phase 3] [Iteration {it}] Conclusion payload: {action_payload}", _ENTITY)
 
             # Adversarial Critic challenge
             self._notify("Phase 3", f"Critic reviewing hypothesis and evidence...")
@@ -312,12 +326,15 @@ class ReflectionEngine:
             critique = str(critic_data.get("critique", ""))
             synthesis = critic_data.get("synthesis")
 
+            log_it(f"[Phase 3] [Iteration {it}] Critic verdict: {critic_status}. Full critique: {critique}", _ENTITY)
+
             history.append({
                 "iteration": it,
                 "hypothesis": current_hypothesis,
                 "action": action_type,
                 "payload": action_payload,
-                "evidence_summary": evidence[:200] + ("..." if len(evidence) > 200 else ""),
+                "generator_reasoning": gen_reasoning,
+                "evidence_summary": evidence[:500] + ("..." if len(evidence) > 500 else ""),
                 "critic_status": critic_status,
                 "critique": critique,
             })
@@ -327,11 +344,12 @@ class ReflectionEngine:
                 status = "accepted"
                 break
             elif critic_status == "REJECT":
-                self._notify("Phase 3", f"Hypothesis rejected as dead end by Critic.")
+                reject_msg = f"Hypothesis rejected as dead end by Critic: {critique}" if critique else "Hypothesis rejected as dead end by Critic."
+                self._notify("Phase 3", reject_msg)
                 status = "rejected"
                 break
             else:
-                self._notify("Phase 3", f"Critic requested refinement: {critique[:80]}...")
+                self._notify("Phase 3", f"Critic requested refinement: {critique}")
 
         # If turn limit reached without explicit rejection, consolidate gathered evidence into synthesis
         if status == "max_turns_exceeded" and history and not synthesis:
@@ -470,6 +488,8 @@ class ReflectionEngine:
             passed_triage, triage_score, category, rationale = self._phase2_triage(seed_concept, topic)
             if not passed_triage:
                 dur = time.time() - start_time
+                rejection_msg = f"Triage score ({triage_score:.2f}) below threshold ({cfg.get('reflection', 'triage_threshold', default=0.70)}): {rationale}"
+                log_it(f"Reflection cycle triaged out: {rejection_msg}", _ENTITY)
                 res = ReflectionResult(
                     id=refl_id,
                     seed_concept=seed_concept,
@@ -484,6 +504,8 @@ class ReflectionEngine:
                     local_reads_count=0,
                     status="triaged_out",
                     duration_seconds=dur,
+                    triage_rationale=rationale,
+                    rejection_reason=rejection_msg,
                 )
                 self._emit_metrics(res)
                 return res
@@ -496,6 +518,9 @@ class ReflectionEngine:
 
             if status not in ("accepted", "max_turns_consolidated") or not synthesis:
                 dur = time.time() - start_time
+                final_critique = history[-1].get("critique", "") if history else ""
+                rejection_msg = final_critique if status == "rejected" else f"Exploration ended with status: {status}"
+                log_it(f"Reflection cycle finished without commitment (status={status}). Rejection reason: {rejection_msg}", _ENTITY)
                 res = ReflectionResult(
                     id=refl_id,
                     seed_concept=seed_concept,
@@ -511,6 +536,9 @@ class ReflectionEngine:
                     status=status,
                     hypothesis=hypothesis,
                     duration_seconds=dur,
+                    triage_rationale=rationale,
+                    rejection_reason=rejection_msg,
+                    history=history,
                 )
                 self._emit_metrics(res)
                 return res
@@ -520,6 +548,12 @@ class ReflectionEngine:
                 seed_concept, topic, hypothesis, synthesis, ref_vecs, history
             )
             final_status = status if committed else "low_delta"
+            rejection_reason = None
+            if not committed:
+                rejection_reason = f"Semantic delta ({delta:.3f}) fell below novelty threshold (redundant with prior memory)."
+                log_it(f"Reflection cycle rejected at Phase 4: {rejection_reason}", _ENTITY)
+            else:
+                log_it(f"Reflection cycle completed successfully and committed to {path} (delta={delta:.3f})", _ENTITY)
 
             dur = time.time() - start_time
             res = ReflectionResult(
@@ -541,6 +575,9 @@ class ReflectionEngine:
                 committed=committed,
                 storage_path=path,
                 duration_seconds=dur,
+                triage_rationale=rationale,
+                rejection_reason=rejection_reason,
+                history=history,
             )
             self._emit_metrics(res)
             return res
@@ -562,6 +599,7 @@ class ReflectionEngine:
                 local_reads_count=0,
                 status="error",
                 duration_seconds=dur,
+                rejection_reason=str(exc),
             )
             self._emit_metrics(res)
             return res
