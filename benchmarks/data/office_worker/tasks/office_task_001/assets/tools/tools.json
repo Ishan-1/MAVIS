@@ -1,0 +1,6 @@
+{
+    "read_emails(query: str = None, sender: str = None, subject: str = None, start_date: str = None, end_date: str = None, unread_only: bool = False) -> tuple[int, list[dict]]": {
+        "description": "Reads emails from the inbox with optional filtering by sender, subject, keywords, date range, or unread status. Returns a tuple of (status_code, list_of_email_dicts).",
+        "generalizability": "repurposable"
+    }
+}

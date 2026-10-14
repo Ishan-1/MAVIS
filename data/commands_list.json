@@ -3,6 +3,10 @@
         "description": "Retrieves the system's current date and time.",
         "generalizability": "generalizable"
     },
+    "search_web(query: str, max_results: int = 5) -> tuple[int, str]": {
+        "description": "Searches the web for real-time information, articles, and websites based on a given query using DuckDuckGo.",
+        "generalizability": "generalizable"
+    },
     "extract_date_from_datetime(datetime_string: str) -> tuple[int, str]": {
         "description": "Extracts the date part (YYYY-MM-DD) from a full datetime string.",
         "generalizability": "generalizable"

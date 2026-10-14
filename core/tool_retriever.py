@@ -32,6 +32,7 @@ _DEFAULT_GENERALIZABILITY: dict[str, str] = {
     "read_file_contents": "generalizable",
     "get_user_display_name": "generalizable",
     "set_user_display_name": "generalizable",
+    "search_web": "generalizable",
     "search_news": "repurposable",
 }
 

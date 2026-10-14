@@ -45,7 +45,9 @@ data/*.db
 memories/**/*.db
 
 # Auto-generated tools, agents, & test files
-tools/
+tools/*
+!tools/run_shell_command.py
+!tools/search_web.py
 tests/
 agents/*
 !agents/__init__.py

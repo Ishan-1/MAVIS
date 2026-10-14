@@ -38,6 +38,7 @@ _DEFAULTS: dict = {
             "get_current_datetime",
             "extract_date_from_datetime",
             "parse_natural_date_to_yyyymmdd",
+            "search_web",
             "search_news",
             "echo",
             "date",

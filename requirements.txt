@@ -8,3 +8,5 @@ prompt_toolkit
 pandas
 streamlit
 neo4j>=5.0.0
+ddgs>=9.0.0
+duckduckgo-search>=8.0.0

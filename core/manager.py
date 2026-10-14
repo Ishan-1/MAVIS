@@ -32,7 +32,7 @@ COMMANDS_LIST_PATH = _REPO_ROOT / "data" / "commands_list.json"
 AGENTS_LIST_PATH = _REPO_ROOT / "data" / "agents_list.json"
 CONFIG_PATH = _REPO_ROOT / "data" / "mavis_config.json"
 
-PROTECTED_BASELINE_TOOLS = {"run_shell_command"}
+PROTECTED_BASELINE_TOOLS = {"run_shell_command", "search_web"}
 PROTECTED_BASELINE_AGENTS = {"semantic_transform"}
 
 
