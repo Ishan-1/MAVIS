@@ -229,7 +229,7 @@ class Neo4jKnowledgeGraph:
         MATCH (s:Entity {{id: $subj_id}})
         MATCH (o:Entity {{id: $obj_id}})
         OPTIONAL MATCH (s)-[old_r:{pred}]->()
-        WHERE $is_functional = true AND old_r.is_active = true
+        WHERE $is_functional = true AND old_r.is_active = true AND old_r.topic = $topic
         SET old_r.is_active = false, old_r.superseded_at = datetime()
         WITH s, o
         CREATE (s)-[new_r:{pred} {{

@@ -108,7 +108,7 @@
         "reflection_worker_interval_minutes": 1440
     },
     "reflection": {
-        "enabled": true,
+        "enabled": false,
         "softmax_temperature": 0.7,
         "triage_threshold": 0.7,
         "novelty_delta_threshold": 0.25,

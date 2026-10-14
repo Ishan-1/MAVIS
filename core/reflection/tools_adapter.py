@@ -89,14 +89,9 @@ def search_web_sandboxed(query: str, max_results: int = 3) -> Tuple[int, str]:
     except Exception as exc:
         log_it(f"Subprocess run_tool search_web failed: {exc}", _ENTITY)
 
-    # Attempt 3: Direct baseline import
-    try:
-        from tools.search_web import search_web
-        status, res = search_web(query, max_results=max_results)
-        return int(status), str(res)
-    except Exception as exc:
-        log_it(f"Direct search_web import failed: {exc}", _ENTITY)
-        return -1, f"Search failed: {exc}"
+    # No in-process fallback: running the tool outside the sandbox would bypass isolation.
+    log_it("Sandboxed search_web failed on all sandboxed paths; refusing in-process fallback.", _ENTITY, level="ERROR")
+    return -1, "Search failed: sandboxed execution unavailable (no unsandboxed fallback)."
 
 
 def read_local_context(relative_path: str, max_chars: int = 4000) -> Tuple[int, str]:

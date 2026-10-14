@@ -65,7 +65,7 @@ This document persists the architectural decisions, operational conventions, and
 
 ### G. Autonomous Reflection (`core/reflection/engine.py`, `tasks/reflection_worker.py`, `/reflect`)
 - Phases: topic selection → triage gate → Generator/Critic loop (sandboxed tools; turn ceiling consolidates evidence) → semantic-delta storage in `memories/reflections/long_term/json/`.
-- Facts are written to Neo4j via `MemoryStore.add_fact` under `reflection.insights` (interpreter subscribes to `reflection.*`).
+- Facts are written to Neo4j via `MemoryStore.add_fact` under `reflection.insights` with `is_functional=False`; the interpreter does NOT read `reflection.*` (unverified web-derived data; needs a human review/promotion step first). `run_cycle` always runs under a `whitelist_only` lease and wraps web evidence/history in `<tool_input>` quarantine. Disabled by default (`reflection.enabled`).
 - Interval is controlled solely by `scheduler.reflection_worker_interval_minutes`. Tests must not write to real `data/metrics/` (see `tests/conftest.py`).
 
 ---

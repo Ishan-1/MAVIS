@@ -71,7 +71,7 @@ execute_pipeline()
 - **Decoupled Promotion & Async Extraction**: Background daemons (`tasks/long_term_worker.py`) scan episodic turn deltas and extract structured entity triples asynchronously (`memories/knowledge_extractor.py`), keeping live conversational turns fast.
 - **Hybrid Dense-Graph Retrieval**: Uses Neo4j 5+ native vector indexing (`entity_embeddings`) to find seed entities, then traverses active 1-hop relationships within subscribed topics in a single Cypher query.
 - **Strict Topic Boundaries**:
-  - `interpreter`: Reads `["user.*", "env.*", "tooling.*", "agents.*", "debugging.*", "reflection.*"]`, writes `user.profile`.
+  - `interpreter`: Reads `["user.*", "env.*", "tooling.*", "agents.*", "debugging.*"]`, writes `user.profile`.
   - `toolbuilder`, `agent_debugger`, & `pipeline_debugger`: Read `["env.*", "tooling.*", "agents.*", "debugging.*"]`. **Hard-blocked from `user.*`**, protecting user privacy and eliminating context pollution in code/pipeline generation.
 - **Deterministic Temporal Deduplication**: Functional 1-to-1 predicates (`PREFERS_EDITOR`, `HAS_OS`, `USES_SHELL`) automatically supersede prior active edges (`is_active = false, superseded_at = datetime()`).
 - **Zero-LLM Subagent & Debugger Writes**: ToolBuilder, ToolDebugger, AgentDebugger, and PipelineDebugger register tool capabilities, AST rules, prompt remedies, and runtime DAG parameter repairs directly into Neo4j without extra LLM overhead.
@@ -128,8 +128,8 @@ execute_pipeline()
 
 ### 10. Autonomous Self-Reflection (`core/reflection/`, `tasks/reflection_worker.py`, `/reflect`)
 - Compute-bounded learning cycles: topic selection (density/variance-gated pivot), triage gate, Generator-vs-Critic exploration loop with sandboxed web/local tools, and semantic-delta novelty check.
-- Insights persist to `memories/reflections/long_term/json/` and, when Neo4j is available, as triples under `reflection.insights` (readable by the interpreter).
-- Runs in a background worker every `scheduler.reflection_worker_interval_minutes` (default 1440), or on demand via `/reflect [seed]`. Tunables live under `reflection` in `data/mavis_config.json`. See `docs/Self-Reflection.md`.
+- Insights persist to `memories/reflections/long_term/json/` and, when Neo4j is available, as triples under `reflection.insights` (not yet readable by the interpreter: reflection output is unverified, web-derived data and awaits a human review step).
+- Disabled by default (`reflection.enabled`). Runs under a `whitelist_only` ONI lease, with web evidence quarantined as untrusted data, in a background worker every `scheduler.reflection_worker_interval_minutes` (default 1440), or on demand via `/reflect [seed]`. Tunables live under `reflection` in `data/mavis_config.json`. See `docs/Self-Reflection.md`.
 
 ---
 

@@ -7,7 +7,7 @@ MAVIS is predominantly a reactive system: it builds Directed Acyclic Graphs (DAG
 The **Autonomous Reflection Architecture** introduces a self-directed, compute-efficient learning cycle during idle periods—analogous to the human brain's REM sleep and hippocampal-neocortical memory consolidation. It extracts recent memory seeds, mathematically determines whether the agent is in an informational rut, explores adjacent concepts through an adversarial hypothesis-and-critic loop, and stores only actionable, high-delta insights into dedicated reflection memory.
 
 ### Core Design Constraints & Guarantees
-- **Zero Hallucination / Zero Database Pollution**: Gated by a low-temperature triage filter and a strict mathematical semantic delta threshold.
+- **Hallucination / Pollution Mitigation** (not elimination): Gated by a low-temperature triage filter and a strict mathematical semantic delta threshold.
 - **Compute Ceiling**: Hard-capped turns, early-exit triage gates, and temperature-controlled exploration to eliminate infinite token burn.
 - **Strict ONI Sandboxing**: Background execution runs isolated at `whitelist_only`. It cannot mutate the filesystem outside `memories/reflections/` or execute unapproved shell commands.
 - **Immutable Baseline Tools**: Invokes existing search and inspection primitives via `core/run_tool.py` without modifying files in `tools/`.
@@ -65,7 +65,7 @@ The **Autonomous Reflection Architecture** introduces a self-directed, compute-e
 ## 3. Phase 1: Initiation and Topic Selection
 
 ### 1. Seed Shard Extraction
-The cycle begins by sampling a recent substantive memory turn $X$ from `MemoryStore` (e.g., from working memory or recent short-term files). Priority is given to turns tagged with `directive=True`, `tool_failure=True`, or strong emotional markers (`intent_strength > 0.85`).
+The cycle begins by sampling the most recent substantive user/assistant turn (truncated to 400 chars) from working memory. Tag-based prioritization (`directive`, `tool_failure`, emotion) is not implemented.
 
 ### 2. Quantifying Existing Knowledge
 The agent vectorizes $X$ using `memories.embedding.embed(X)` and queries the vector store for the top-$k$ nearest memories $\{m_1, m_2, \dots, m_k\}$ (with $k=10$).
@@ -109,7 +109,7 @@ A single low-temperature prompt (`temperature=0.0`) evaluates $(X, c^*)$ against
 3. **Conceptual Compression**: Does it unify disparate mechanisms into a simpler, higher-level mental model?
 
 ### Hard Kill Gate
-The router outputs a JSON payload with a calibrated utility score $\in [0.0, 1.0]$:
+The router outputs a JSON payload with an LLM-estimated (uncalibrated) utility score $\in [0.0, 1.0]$:
 ```json
 {
   "utility_score": 0.82,
@@ -187,10 +187,11 @@ Validated thoughts that exit the exploration loop undergo a mathematical delta a
 
 ### 1. Semantic Delta Rubric
 Let $V_{\text{insight}}$ be the vector embedding of the synthesized thought:
-$$\Delta = 1 - \max_{m \in \text{Memories}} \text{cosine\_similarity}(V_{\text{insight}}, V_m)$$
+$$\Delta = 1 - \max_{m \in \text{RefVectors}} \text{cosine\_similarity}(V_{\text{insight}}, V_m)$$
+*(where $\text{RefVectors}$ contains up to 10 vector embeddings from the active working memory and recent reflection files closest to the seed concept, rather than the entire historical memory database)*
 
 * **Paraphrase Rejection ($\Delta < 0.25$)**: If the synthesis has high similarity to pre-existing memories, it is discarded as a redundant restatement.
-* **Grounding Sanity Check ($\Delta > 0.85$)**: If the synthesis has drifted entirely away from any grounded agent context, it is flagged for quarantine to avoid stray hallucination.
+* **Grounding Sanity Check ($\Delta > 0.85$)**: *Not implemented.* (A planned filter to flag insights that completely drift from grounded context).
 
 ### 2. Dedicated Storage: `memories/reflections/`
 All validated reflection memories are quarantined in their own domain to prevent polluting standard conversational working memory:
@@ -208,7 +209,7 @@ All validated reflection memories are quarantined in their own domain to prevent
     "evidence_sources": ["web:docs.rs/regex", "local:logs/pipeline_debugger.log"]
   }
   ```
-- **Neo4j Knowledge Graph**: Structured triples are extracted via `memories/knowledge_extractor.py` and committed under the topic namespace `reflection.insights`.
+- **Neo4j Knowledge Graph**: Structured triples are extracted via `memories/knowledge_extractor.py` and committed under the topic namespace `reflection.insights` with `is_functional=False`. These are not read by the Interpreter until reviewed and promoted by a human.
 
 ### 3. Telemetry Logging
 Every reflection execution appends a row to `data/metrics/reflection.csv`:

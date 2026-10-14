@@ -102,7 +102,7 @@ _DEFAULTS: dict = {
     },
 
     "reflection": {
-        "enabled": True,
+        "enabled": False,
         "softmax_temperature": 0.7,
         "triage_threshold": 0.70,
         "novelty_delta_threshold": 0.25,
