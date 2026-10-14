@@ -76,6 +76,11 @@ CSV_SCHEMAS: dict[str, list[str]] = {
     "goal_runner": [
         "timestamp", "goal_id", "goal", "status", "waves_executed", "total_steps", "duration_s"
     ],
+    "reflection": [
+        "timestamp", "reflection_id", "seed_concept", "selected_topic",
+        "pivoted", "triage_score", "iterations_used", "web_searches_count",
+        "local_reads_count", "semantic_delta", "status", "committed", "latency_ms"
+    ],
 }
 
 

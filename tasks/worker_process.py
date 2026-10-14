@@ -94,6 +94,8 @@ def main():
         import tasks.short_term_worker as task_mod
     elif worker_name == "long_term":
         import tasks.long_term_worker as task_mod
+    elif worker_name == "reflection":
+        import tasks.reflection_worker as task_mod
     else:
         log_it(f"Unknown worker name: {worker_name}", entity)
         sys.exit(1)

@@ -109,6 +109,7 @@ _SLASH_SUBCOMMANDS = {
     "/tooldash": ["tools", "agents", "mcp"],
     "/mcp": ["status", "list", "reload"],
     "/goal": ["--yolo"],
+    "/reflect": [],
 }
 
 _COMMAND_METAS = {
@@ -126,6 +127,7 @@ _COMMAND_METAS = {
     "/unlist": "Remove command from all ONI lists",
     "/mcp": "Inspect or manage MCP servers and tools",
     "/goal": "Execute an autonomous multi-wave goal (add --yolo for unattended run)",
+    "/reflect": "Execute an autonomous self-directed reflection cycle (optional: /reflect <seed>)",
 }
 
 
@@ -262,6 +264,7 @@ _HELP_ROWS = [
     ("/unlist <cmd>",            "Remove from all ONI lists."),
     ("/mcp [status|list|reload]","Inspect, list, or reload MCP servers and tools."),
     ("/goal [--yolo] <desc>",    "Autonomous multi-wave goal (use --yolo for unattended run)."),
+    ("/reflect [<seed>]",        "Autonomous self-directed reflection cycle."),
 ]
 
 
@@ -402,6 +405,40 @@ def _launch_streamlit_app(script_path: str, port: int, app_name: str) -> subproc
         return None
 
 
+def _cmd_reflect(seed: str | None = None) -> None:
+    """Execute an interactive autonomous reflection cycle with live progress output."""
+    from core.reflection.engine import ReflectionEngine
+    rule("Autonomous Reflection")
+    mavis_print("  [bold cyan]Autonomous Reflection[/bold cyan] [dim]— Initiating cognitive cycle...[/dim]")
+
+    def _progress(phase: str, msg: str):
+        mavis_print(f"  [cyan][{phase}][/cyan] [dim]{msg}[/dim]")
+
+    try:
+        engine = ReflectionEngine(client=llm, store=memory_store, progress_callback=_progress)
+        res = engine.run_cycle(seed=seed)
+
+        rule()
+        if res.status in ("accepted", "max_turns_consolidated") and res.committed and res.synthesis:
+            title = "✔ Reflection Insight Validated" if res.status == "accepted" else "✔ Reflection Insight Consolidated at Turn Limit"
+            mavis_print(f"  [bold green]{title}[/bold green] (Δ={res.semantic_delta:.3f})")
+            mavis_print(f"  [bold]Topic:[/bold] {res.selected_topic}")
+            if res.hypothesis:
+                mavis_print(f"  [bold]Hypothesis:[/bold] {res.hypothesis}")
+            mavis_print(f"\n  [italic]{res.synthesis}[/italic]")
+            if res.storage_path:
+                mavis_print(f"\n  [dim]Committed to: {res.storage_path}[/dim]")
+        elif res.status == "triaged_out":
+            mavis_status(f"Triage Filtered: Topic score ({res.triage_score:.2f}) fell below utility threshold.")
+        elif res.status == "low_delta":
+            mavis_status(f"Novelty Rejection: Insight semantic delta ({res.semantic_delta:.3f}) is redundant with prior knowledge.")
+        else:
+            mavis_status(f"Reflection cycle finished with status: {res.status}")
+        rule()
+    except Exception as exc:
+        mavis_error(f"Reflection cycle failed: {exc}")
+
+
 def handle_slash_command(raw: str) -> bool:
     """
     Handle a /command string. Returns True if it was a slash command (so the
@@ -464,6 +501,12 @@ def handle_slash_command(raw: str) -> bool:
             })
         else:
             mavis_error("Goal runner is not initialized.")
+        return True
+
+    # ── /reflect [seed] ───────────────────────────────────────────────────────
+    if verb == "/reflect":
+        seed_arg = raw[len(parts[0]):].strip() or None
+        _cmd_reflect(seed_arg)
         return True
 
     # ── /save [filename] ──────────────────────────────────────────────────────
@@ -1640,8 +1683,10 @@ def _start_workers() -> None:
     for name, interval_key in [
         ("short_term", "short_term_worker_interval_minutes"),
         ("long_term", "long_term_worker_interval_minutes"),
+        ("reflection", "reflection_worker_interval_minutes"),
     ]:
-        interval = cfg.scheduler.get(interval_key, 15 if name == "short_term" else 480)
+        default_int = 15 if name == "short_term" else (480 if name == "long_term" else 1440)
+        interval = cfg.scheduler.get(interval_key, default_int)
         proc = subprocess.Popen(
             [
                 sys.executable,

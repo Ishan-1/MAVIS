@@ -98,6 +98,16 @@ _DEFAULTS: dict = {
         "tick_seconds": 30,
         "short_term_worker_interval_minutes": 15,
         "long_term_worker_interval_minutes": 480,
+        "reflection_worker_interval_minutes": 1440,
+    },
+
+    "reflection": {
+        "enabled": True,
+        "interval_minutes": 1440,
+        "softmax_temperature": 0.7,
+        "triage_threshold": 0.70,
+        "novelty_delta_threshold": 0.25,
+        "max_exploration_turns": 3,
     },
 
     "output": {
