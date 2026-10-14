@@ -10,6 +10,7 @@ from typing import Any, Callable
 from core.agents.base import BaseAgent
 from core.agents.subagent import Subagent
 from core.helpers import log_it
+from core.output import mavis_status
 from core.llm.base import BaseLLMClient
 from prompts.agent_prompt_templates import agent_tester_input_prompt, agent_judge_prompt
 
@@ -124,6 +125,7 @@ class AgentTester:
         )
 
         log_it(f"Running {len(cases)} test case(s) for {agent_type} '{agent_instance.name}'", _ENTITY)
+        mavis_status(f"Testing candidate {agent_type} '{agent_instance.name}' ({len(cases)} test case(s))...")
 
         for case in cases:
             case_id = case.get("id", "unknown")

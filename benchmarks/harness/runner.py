@@ -12,6 +12,7 @@ import datetime
 import json
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -34,10 +35,11 @@ from benchmarks.harness.simulated_user import SimulatedUser
 
 
 @contextlib.contextmanager
-def task_asset_context(ws: Path):
+def task_asset_context(ws: Path, task: TaskSpec | None = None):
     """
     Temporarily exposes task-specific simulated resources (such as data/emails.json)
-    at root paths expected by legacy MAVIS tools, cleaning them up upon completion.
+    and dynamically registers task-specific benchmark tools (from assets/tools/)
+    into MAVIS's tool directory and catalog, strictly cleaning them up upon completion.
     """
     root_data_emails = Path("data/emails.json")
     created_emails = False
@@ -62,6 +64,86 @@ def task_asset_context(ws: Path):
         root_data_emails.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(emails_file, root_data_emails)
         created_emails = True
+
+    # ── Temporary Benchmark Tools (copy & register) ──────────────────────────
+    copied_tools: list[Path] = []
+    registered_sigs: list[str] = []
+    commands_path = Path("data/commands_list.json")
+    original_commands_content = (
+        commands_path.read_text(encoding="utf-8") if commands_path.exists() else None
+    )
+
+    tool_sources: list[Path] = []
+    if task and task.task_dir:
+        p1 = task.task_dir / "assets" / "tools"
+        if p1.exists() and p1.is_dir():
+            tool_sources.append(p1)
+        p2 = task.task_dir / "tools"
+        if p2.exists() and p2.is_dir():
+            tool_sources.append(p2)
+    if task and task.persona:
+        p3 = Path(f"benchmarks/data/{task.persona}/tools")
+        if p3.exists() and p3.is_dir():
+            tool_sources.append(p3)
+
+    tools_dir = Path("tools")
+    tools_dir.mkdir(parents=True, exist_ok=True)
+
+    for src_dir in tool_sources:
+        meta_dict = {}
+        meta_json = src_dir / "tools.json"
+        if meta_json.exists():
+            try:
+                meta_dict = json.loads(meta_json.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        for py_file in src_dir.glob("*.py"):
+            target_tool = tools_dir / py_file.name
+            if not target_tool.exists():
+                shutil.copy2(py_file, target_tool)
+                copied_tools.append(target_tool)
+
+                func_name = py_file.stem
+                found_sig = None
+                found_meta = None
+                for sig, meta in meta_dict.items():
+                    if sig.startswith(func_name + "(") or sig.startswith(func_name + " "):
+                        found_sig = sig
+                        found_meta = meta
+                        break
+
+                if not found_sig:
+                    found_sig = f"{func_name}() -> tuple[int, Any]"
+                    found_meta = {
+                        "description": f"Benchmark tool {func_name}",
+                        "generalizability": "repurposable",
+                    }
+
+                # Update data/commands_list.json
+                if commands_path.exists():
+                    try:
+                        cmds = json.loads(commands_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        cmds = {}
+                    cmds[found_sig] = found_meta
+                    commands_path.write_text(json.dumps(cmds, indent=4), encoding="utf-8")
+                    registered_sigs.append(found_sig)
+
+                # Update in-memory MAVIS if main is loaded
+                if "main" in sys.modules:
+                    main_mod = sys.modules["main"]
+                    if hasattr(main_mod, "commands_list") and isinstance(main_mod.commands_list, dict):
+                        main_mod.commands_list[found_sig] = found_meta
+                    if hasattr(main_mod, "tool_retriever") and main_mod.tool_retriever:
+                        try:
+                            main_mod.tool_retriever.index_tool(
+                                found_sig,
+                                found_meta.get("description", ""),
+                                generalizability=found_meta.get("generalizability", "repurposable"),
+                            )
+                        except Exception:
+                            pass
 
     root_workspace = Path("workspace")
     created_workspace_symlink = False
@@ -113,6 +195,42 @@ def task_asset_context(ws: Path):
                 try:
                     root_data_emails.unlink()
                 except OSError:
+                    pass
+
+        # ── Cleanup temporary benchmark tools ────────────────────────────────
+        for ct in copied_tools:
+            try:
+                if ct.exists():
+                    ct.unlink()
+            except OSError:
+                pass
+            mod_name = f"tools.{ct.stem}"
+            if mod_name in sys.modules:
+                del sys.modules[mod_name]
+            if ct.stem in sys.modules:
+                del sys.modules[ct.stem]
+
+        if original_commands_content is not None and commands_path.exists():
+            commands_path.write_text(original_commands_content, encoding="utf-8")
+        elif registered_sigs and commands_path.exists():
+            try:
+                cmds = json.loads(commands_path.read_text(encoding="utf-8"))
+                for sig in registered_sigs:
+                    cmds.pop(sig, None)
+                commands_path.write_text(json.dumps(cmds, indent=4), encoding="utf-8")
+            except Exception:
+                pass
+
+        if "main" in sys.modules:
+            main_mod = sys.modules["main"]
+            if hasattr(main_mod, "commands_list") and isinstance(main_mod.commands_list, dict):
+                for sig in registered_sigs:
+                    main_mod.commands_list.pop(sig, None)
+            if hasattr(main_mod, "tool_retriever") and main_mod.tool_retriever:
+                try:
+                    from core.tool_retriever import ToolRetriever
+                    main_mod.tool_retriever = ToolRetriever(main_mod.commands_list)
+                except Exception:
                     pass
 
 
@@ -265,7 +383,7 @@ class BenchmarkRunner:
         execution_trace: list[dict[str, Any]] = []
         command_logs: list[dict[str, Any]] = []
 
-        with task_asset_context(ws):
+        with task_asset_context(ws, task=task):
             # Clear MAVIS working memory so each task starts in clean isolation
             from memories.memory_store import clear_all_working_memories
             clear_all_working_memories()

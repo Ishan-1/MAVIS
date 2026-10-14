@@ -192,6 +192,16 @@ class ONI:
         elif norm.startswith("./"):
             norm = norm[2:]
 
+        # System directories and config files belonging to MAVIS itself must remain anchored to the project root
+        _SYSTEM_ROOT_PREFIXES = (
+            "tools/", "tests/", "agents/", "memories/", "data/",
+            "logs/", "config/", "prompts/", "core/", "oni/", "benchmarks/"
+        )
+        _SYSTEM_ROOT_FILES = ("requirements.txt", ".env")
+
+        if norm in _SYSTEM_ROOT_FILES or any(norm.startswith(p) for p in _SYSTEM_ROOT_PREFIXES):
+            return os.path.normpath(os.path.join(os.getcwd(), norm))
+
         return os.path.normpath(os.path.join(ws, norm))
 
     # ── Pre-flight scan ───────────────────────────────────────────────────────

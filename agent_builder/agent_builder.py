@@ -21,6 +21,7 @@ from prompts.agent_prompt_templates import (
     cognitive_updater_prompt,
     subagent_updater_prompt,
 )
+from core.output import mavis_status, mavis_ok, mavis_warn
 from core.metrics import MetricEmitter
 
 _ENTITY = "agent_builder"
@@ -211,7 +212,9 @@ class AgentBuilder:
                     _ENTITY,
                 )
                 if attempt == self.MAX_RETRIES:
+                    mavis_warn(f"[AgentDebugger] Candidate '{clean_name}' failed to load and exhausted retries: {load_err}")
                     break
+                mavis_status(f"[AgentDebugger] Candidate '{clean_name}' failed to load: {load_err}. Diagnosing and repairing...")
                 current_code = open(f"agents/{clean_name}.py").read()
                 fixed_code, fix_summary = self.debugger.debug_agent(
                     agent_name=clean_name,
@@ -222,6 +225,7 @@ class AgentBuilder:
                     failure_reason=last_failure_reason,
                     agent_type=clean_type,
                 )
+                mavis_status(f"[AgentDebugger] Repair action: {fix_summary} Retrying...")
                 self._write_agent_file(clean_name, fixed_code)
                 attempt += 1
                 continue
@@ -237,6 +241,8 @@ class AgentBuilder:
             if status == 0:
                 latency_ms = round((time.perf_counter() - t0) * 1000, 2)
                 log_it(f"Agent '{clean_name}' ({clean_type}) passed verification on attempt {attempt}.", _ENTITY)
+                if attempt > 0:
+                    mavis_ok(f"[AgentDebugger] Candidate '{clean_name}' repaired and verified successfully after {attempt} retry(ies).")
                 self._register_agent(
                     agent_name=clean_name,
                     description=agent_description,
@@ -283,8 +289,13 @@ class AgentBuilder:
             )
 
             if attempt == self.MAX_RETRIES:
+                mavis_warn(f"[AgentDebugger] Candidate '{clean_name}' exhausted all {self.MAX_RETRIES} repair attempts.")
                 break
 
+            mavis_status(
+                f"[AgentDebugger] Candidate {clean_type} '{clean_name}' failed verification (attempt {attempt + 1}/{self.MAX_RETRIES}): "
+                f"{str(last_failure_reason)[:120]}. Diagnosing..."
+            )
             current_code = open(f"agents/{clean_name}.py").read()
             fixed_code, fix_summary = self.debugger.debug_agent(
                 agent_name=clean_name,
@@ -295,6 +306,7 @@ class AgentBuilder:
                 failure_reason=last_failure_reason,
                 agent_type=clean_type,
             )
+            mavis_status(f"[AgentDebugger] Repair action: {fix_summary} Retrying...")
             self._write_agent_file(clean_name, fixed_code)
             attempt += 1
 
@@ -449,7 +461,9 @@ class AgentBuilder:
                     _ENTITY,
                 )
                 if attempt == self.MAX_RETRIES:
+                    mavis_warn(f"[AgentDebugger] Updated agent '{clean_name}' failed to load and exhausted retries: {load_err}")
                     break
+                mavis_status(f"[AgentDebugger] Updated agent '{clean_name}' failed to load: {load_err}. Diagnosing and repairing...")
                 current_code_on_disk = open(f"agents/{clean_name}.py", "r", encoding="utf-8").read()
                 fixed_code, fix_summary = self.debugger.debug_agent(
                     agent_name=clean_name,
@@ -460,6 +474,7 @@ class AgentBuilder:
                     failure_reason=last_failure_reason,
                     agent_type=clean_type,
                 )
+                mavis_status(f"[AgentDebugger] Repair action: {fix_summary} Retrying...")
                 self._write_agent_file(clean_name, fixed_code)
                 attempt += 1
                 continue
@@ -475,6 +490,8 @@ class AgentBuilder:
             if status == 0:
                 latency_ms = round((time.perf_counter() - t0) * 1000, 2)
                 log_it(f"Updated agent '{clean_name}' ({clean_type}) passed verification on attempt {attempt}.", _ENTITY)
+                if attempt > 0:
+                    mavis_ok(f"[AgentDebugger] Repaired and verified updated agent '{clean_name}' after {attempt} retry(ies).")
 
                 if os.path.exists(catalog_path):
                     with open(catalog_path, "r", encoding="utf-8") as f:
@@ -527,8 +544,13 @@ class AgentBuilder:
                 _ENTITY,
             )
             if attempt == self.MAX_RETRIES:
+                mavis_warn(f"[AgentDebugger] Updated agent '{clean_name}' exhausted all {self.MAX_RETRIES} repair attempts.")
                 break
 
+            mavis_status(
+                f"[AgentDebugger] Updated {clean_type} '{clean_name}' failed verification (attempt {attempt + 1}/{self.MAX_RETRIES}): "
+                f"{str(last_failure_reason)[:120]}. Diagnosing..."
+            )
             current_code_on_disk = open(f"agents/{clean_name}.py", "r", encoding="utf-8").read()
             fixed_code, fix_summary = self.debugger.debug_agent(
                 agent_name=clean_name,
@@ -539,6 +561,7 @@ class AgentBuilder:
                 failure_reason=last_failure_reason,
                 agent_type=clean_type,
             )
+            mavis_status(f"[AgentDebugger] Repair action: {fix_summary} Retrying...")
             self._write_agent_file(clean_name, fixed_code)
             attempt += 1
 
