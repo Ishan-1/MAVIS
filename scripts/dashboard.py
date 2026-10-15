@@ -248,17 +248,18 @@ with tab_caching:
     if df_cache.empty:
         st.info("No caching telemetry recorded yet.")
     else:
+        total = len(df_cache)
         hits = (df_cache["cache_status"] == "hit").sum()
         bypassed = (df_cache["cache_status"].isin(["bypassed", "prefiltered"])).sum()
-        total = len(df_cache)
-        hit_rate = (hits / total * 100) if total > 0 else 0.0
+        eligible = total - bypassed
+        hit_rate = (hits / eligible * 100) if eligible > 0 else 0.0
         tokens_saved = df_cache["estimated_tokens_saved"].sum() if "estimated_tokens_saved" in df_cache.columns else 0
 
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Cache Checks", f"{total:,}")
-        c2.metric("Cache Hits", f"{hits:,}")
+        c2.metric("Eligible Checks", f"{eligible:,}")
         c3.metric("Pre-filtered (Context)", f"{bypassed:,}")
-        c4.metric("Hit Rate", f"{hit_rate:.1f}%")
+        c4.metric("Hit Rate (Eligible)", f"{hit_rate:.1f}%")
         c5.metric("Tokens Saved", f"{tokens_saved:,}")
 
         col_tier, col_sim = st.columns(2)

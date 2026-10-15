@@ -8,6 +8,7 @@ import os
 import json
 import time
 import sqlite3
+import hashlib
 from typing import Any
 
 from core.helpers import log_it
@@ -272,7 +273,7 @@ class CacheManager:
                 return
 
         try:
-            doc_id = str(hash(query))
+            doc_id = hashlib.sha256(query.strip().lower().encode("utf-8")).hexdigest()[:16]
             query_vec = embed(query, self._client)
             now = int(time.time())
             ttl_timestamp = now + ttl_seconds

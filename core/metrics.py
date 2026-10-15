@@ -256,23 +256,28 @@ def get_metrics_summary(since_timestamp: float | None = None) -> dict[str, Any]:
 
     # 4. Caching
     cache_rows = _read_csv_rows("caching", since_timestamp)
+    total_checks = len(cache_rows)
     cache_hits = sum(1 for r in cache_rows if r.get("cache_status") == "hit")
     bypassed = sum(1 for r in cache_rows if r.get("cache_status") in ("bypassed", "prefiltered"))
+    eligible_checks = total_checks - bypassed
     instant_hits = sum(1 for r in cache_rows if r.get("hit_tier") in ("instant", "tier_instant_hit"))
     verified_hits = sum(1 for r in cache_rows if r.get("hit_tier") in ("llm_verified", "tier_llm_verified"))
     tokens_saved = sum(int(r.get("tokens_saved_estimate") or r.get("estimated_tokens_saved") or 0) for r in cache_rows)
     cache_latencies = [float(r["latency_ms"]) for r in cache_rows if r.get("latency_ms")]
     cache_stats = _compute_stats(cache_latencies)
-    hit_rate = round(cache_hits / len(cache_rows) * 100, 1) if cache_rows else 0.0
+    hit_rate = round(cache_hits / eligible_checks * 100, 1) if eligible_checks > 0 else 0.0
+    bypass_rate = round(bypassed / total_checks * 100, 1) if total_checks > 0 else 0.0
 
     summary["caching"] = {
-        "total_checks": len(cache_rows),
-        "checks": len(cache_rows),
+        "total_checks": total_checks,
+        "checks": total_checks,
+        "eligible_checks": eligible_checks,
         "hits": cache_hits,
-        "misses": len(cache_rows) - cache_hits,
+        "misses": eligible_checks - cache_hits,
         "bypassed": bypassed,
         "hit_rate": hit_rate,
         "hit_rate_pct": hit_rate,
+        "bypass_rate_pct": bypass_rate,
         "instant_hits": instant_hits,
         "verified_hits": verified_hits,
         "tokens_saved": tokens_saved,
