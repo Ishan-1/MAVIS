@@ -139,6 +139,7 @@ _DEFAULTS: dict = {
     },
     "caching": {
         "enabled": False,
+        "filter_context_dependent": True,
     },
 }
 

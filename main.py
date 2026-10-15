@@ -1665,7 +1665,8 @@ def interpret_command(command: str) -> bool:
     if res:
         ttl = response_dict.get("ttl", 300)
         gen = response_dict.get("generalizability", "specialized")
-        cache_manager.save_cache(command, pipeline, res, ttl, gen)
+        cacheable = response_dict.get("cacheable", True)
+        cache_manager.save_cache(command, pipeline, res, ttl, gen, cacheable=cacheable)
 
     # 4. Store assistant response in working memory
     last_assistant_text = _session_chat[-1]["content"] if (_session_chat and _session_chat[-1]["role"] == "assistant") else ""

@@ -15,6 +15,7 @@ from core.llm import get_llm_client, BaseLLMClient
 from memories.embedding import embed, cosine_similarity
 from core.config import cfg
 from core.metrics import MetricEmitter
+from core.caching_filter import is_context_dependent_query
 
 _ENTITY = "caching"
 _EMITTER = MetricEmitter("caching")
@@ -51,6 +52,8 @@ class CacheManager:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_ttl ON pipeline_cache(ttl_timestamp)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_inserted ON pipeline_cache(inserted_at)")
                 conn.commit()
+            if cfg.caching.get("filter_context_dependent", True):
+                self.purge_context_dependent_entries()
         except Exception as exc:
             log_it(f"Failed to initialize SQLite pipeline cache: {exc}", _ENTITY)
 
@@ -94,6 +97,23 @@ class CacheManager:
         """
         if not cfg.caching.get("enabled", False):
             return None
+
+        # Pre-filter: Do not check cache for queries depending on previous conversational context
+        if cfg.caching.get("filter_context_dependent", True):
+            is_dep, reason = is_context_dependent_query(query)
+            if is_dep:
+                log_it(f"Cache check pre-filtered (context-dependent: {reason}) for query: {query!r}", _ENTITY)
+                _EMITTER.log({
+                    "turn_id": turn_id,
+                    "cache_status": "bypassed",
+                    "hit_tier": "prefiltered_context",
+                    "similarity_score": 0.0,
+                    "llm_verify_result": "n/a",
+                    "ttl_valid": False,
+                    "latency_ms": 0.0,
+                    "tokens_saved_estimate": 0,
+                })
+                return None
 
         t0 = time.perf_counter()
         try:
@@ -227,10 +247,29 @@ class CacheManager:
             })
             return None
 
-    def save_cache(self, query: str, pipeline: list[dict], result: Any, ttl_seconds: int = 300, generalizability: str = "specialized"):
+    def save_cache(
+        self,
+        query: str,
+        pipeline: list[dict],
+        result: Any,
+        ttl_seconds: int = 300,
+        generalizability: str = "specialized",
+        cacheable: bool = True,
+    ):
         """Save a pipeline and its execution result to SQLite cache."""
         if not cfg.caching.get("enabled", False):
             return
+
+        if not cacheable:
+            log_it(f"Cache save skipped (explicitly uncacheable) for query: {query!r}", _ENTITY)
+            return
+
+        # Pre-filter: Do not cache queries depending on previous conversational context
+        if cfg.caching.get("filter_context_dependent", True):
+            is_dep, reason = is_context_dependent_query(query)
+            if is_dep:
+                log_it(f"Cache save pre-filtered (context-dependent: {reason}) - skipping save for query: {query!r}", _ENTITY)
+                return
 
         try:
             doc_id = str(hash(query))
@@ -295,6 +334,29 @@ class CacheManager:
                     log_it(f"LRU Evicted {to_delete} oldest cache entries.", _ENTITY)
         except Exception as e:
             log_it(f"Failed LRU eviction: {e}", _ENTITY)
+
+    def purge_context_dependent_entries(self) -> int:
+        """
+        Scan SQLite cache and remove historical queries that are context-dependent.
+        Returns the count of purged entries.
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, query FROM pipeline_cache")
+                rows = cursor.fetchall()
+                to_delete = [
+                    row_id for row_id, query_str in rows
+                    if is_context_dependent_query(query_str)[0]
+                ]
+                if to_delete:
+                    cursor.executemany("DELETE FROM pipeline_cache WHERE id = ?", [(rid,) for rid in to_delete])
+                    conn.commit()
+                    log_it(f"Purged {len(to_delete)} context-dependent cache entries from {self.db_path}", _ENTITY)
+                return len(to_delete)
+        except Exception as exc:
+            log_it(f"Failed to purge context-dependent cache entries: {exc}", _ENTITY)
+            return 0
 
 
 # Global singleton

@@ -257,6 +257,7 @@ def get_metrics_summary(since_timestamp: float | None = None) -> dict[str, Any]:
     # 4. Caching
     cache_rows = _read_csv_rows("caching", since_timestamp)
     cache_hits = sum(1 for r in cache_rows if r.get("cache_status") == "hit")
+    bypassed = sum(1 for r in cache_rows if r.get("cache_status") in ("bypassed", "prefiltered"))
     instant_hits = sum(1 for r in cache_rows if r.get("hit_tier") in ("instant", "tier_instant_hit"))
     verified_hits = sum(1 for r in cache_rows if r.get("hit_tier") in ("llm_verified", "tier_llm_verified"))
     tokens_saved = sum(int(r.get("tokens_saved_estimate") or r.get("estimated_tokens_saved") or 0) for r in cache_rows)
@@ -269,6 +270,7 @@ def get_metrics_summary(since_timestamp: float | None = None) -> dict[str, Any]:
         "checks": len(cache_rows),
         "hits": cache_hits,
         "misses": len(cache_rows) - cache_hits,
+        "bypassed": bypassed,
         "hit_rate": hit_rate,
         "hit_rate_pct": hit_rate,
         "instant_hits": instant_hits,

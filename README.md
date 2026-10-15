@@ -45,7 +45,7 @@ execute_pipeline()
       │                                ├─ Diagnoses root cause from error message & prior outputs
       │                                ├─ Patches parameters (e.g. path prefixes) or replaces node
       │                                └─ Retries execution closed-loop (up to 2 attempts)
-      ├─ cache_manager.save()  ← Caches executed pipeline & results to SQLite (on success)
+      ├─ cache_manager.save()  ← Caches executed pipeline & results to SQLite (on success) if they are not context dependent
       └─ Answerer.synthesize() ← Terminal presentation layer: synthesizes final output (or explains failures gracefully)
 ```
 
@@ -107,7 +107,7 @@ execute_pipeline()
   - `0.85 - 0.95` similarity: Fast LLM verification checks if the cached pipeline satisfies the query.
 - **Dynamic Parameter Extraction**: Adapts generalized pipelines to new inputs without replanning.
 - **Lifecycle Management**: TTL invalidation for time-sensitive results and LRU eviction for storage caps.
-
+- **Pre-filtering of Context-based queries:** `caching_filter.py` filters out context-dependent queries to prevent cache hits such as "Is this good?", "Do that" , etc.
 ### 7. Categorical Tool Retrieval (`core/tool_retriever.py`)
 - **Prefix Caching Optimization**: Tools are classified into:
   - `generalizable`: Essential primitives (file reading, datetime). **Always included** in the prompt to prevent planning hallucinations.
