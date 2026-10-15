@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ from core.reflection.prompts import (
     PIVOT_CANDIDATES_PROMPT,
     TRIAGE_ROUTER_PROMPT,
     CONSOLIDATION_PROMPT,
+    CONCEPT_EXTRACTION_PROMPT,
 )
 from core.reflection.tools_adapter import read_local_context, search_web_sandboxed
 
@@ -45,6 +47,216 @@ _ENTITY = "reflection_engine"
 _METRICS = MetricEmitter("reflection")
 _MAV_ROOT = Path(__file__).resolve().parent.parent.parent
 _REFLECTIONS_DIR = _MAV_ROOT / "memories" / "reflections"
+
+
+def load_seed_pool(reflections_dir: Optional[Path] = None) -> list[str]:
+    """Load the dedicated reflection seed pool from seeds.json."""
+    target_dir = Path(reflections_dir) if reflections_dir else _REFLECTIONS_DIR
+    seeds_file = target_dir / "seeds.json"
+    if not seeds_file.exists():
+        return []
+    try:
+        with open(seeds_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return [str(s).strip() for s in data if str(s).strip()]
+    except Exception as exc:
+        log_it(f"Failed to load seed pool: {exc}", _ENTITY)
+    return []
+
+
+def add_seed_to_pool(seed: str, reflections_dir: Optional[Path] = None) -> bool:
+    """Add a new seed concept to the dedicated seed pool."""
+    clean_seed = seed.strip()
+    if not clean_seed:
+        return False
+    target_dir = Path(reflections_dir) if reflections_dir else _REFLECTIONS_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    seeds_file = target_dir / "seeds.json"
+    current = load_seed_pool(target_dir)
+    if clean_seed in current:
+        return True
+    current.append(clean_seed)
+    try:
+        with open(seeds_file, "w", encoding="utf-8") as f:
+            json.dump(current, f, indent=2)
+        log_it(f"Added seed to pool: '{clean_seed}'", _ENTITY)
+        return True
+    except Exception as exc:
+        log_it(f"Failed to add seed to pool: {exc}", _ENTITY)
+        return False
+
+
+def remove_seed_from_pool(seed: str, reflections_dir: Optional[Path] = None) -> bool:
+    """Remove a seed concept from the dedicated seed pool."""
+    clean_seed = seed.strip()
+    target_dir = Path(reflections_dir) if reflections_dir else _REFLECTIONS_DIR
+    seeds_file = target_dir / "seeds.json"
+    current = load_seed_pool(target_dir)
+    if clean_seed not in current:
+        return False
+    current = [s for s in current if s != clean_seed]
+    try:
+        with open(seeds_file, "w", encoding="utf-8") as f:
+            json.dump(current, f, indent=2)
+        log_it(f"Removed seed from pool: '{clean_seed}'", _ENTITY)
+        return True
+    except Exception as exc:
+        log_it(f"Failed to remove seed from pool: {exc}", _ENTITY)
+        return False
+
+
+def load_reflection_journal(reflections_dir: Optional[Path] = None) -> list[dict]:
+    """Load all reflection records from journal.json."""
+    target_dir = Path(reflections_dir) if reflections_dir else _REFLECTIONS_DIR
+    journal_file = target_dir / "journal.json"
+    if not journal_file.exists():
+        return []
+    try:
+        with open(journal_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return data
+    except Exception as exc:
+        log_it(f"Failed to load reflection journal: {exc}", _ENTITY)
+    return []
+
+
+def verify_and_promote_reflection(
+    record_id: str,
+    client: Optional[BaseLLMClient] = None,
+    store: Optional[MemoryStore] = None,
+    reflections_dir: Optional[Path] = None,
+) -> bool:
+    """
+    Verify and promote an unverified reflection insight.
+    Marks entry as verified in journal.json, commits it to long-term memory as a fact,
+    and makes it available for the active DAG planner and future seed pool cycles.
+    """
+    target_dir = Path(reflections_dir) if reflections_dir else _REFLECTIONS_DIR
+    journal_file = target_dir / "journal.json"
+    if not journal_file.exists():
+        return False
+
+    entries = load_reflection_journal(target_dir)
+    target_entry = None
+    for entry in entries:
+        if entry.get("id") == record_id:
+            target_entry = entry
+            break
+
+    if not target_entry:
+        return False
+
+    target_entry["verified"] = True
+    target_entry["status"] = "verified"
+    target_entry["promoted_at"] = time.time()
+
+    # Save updated journal.json
+    try:
+        with open(journal_file, "w", encoding="utf-8") as f:
+            json.dump(entries, f, indent=2)
+    except Exception as exc:
+        log_it(f"Failed to save verified journal entry: {exc}", _ENTITY)
+        return False
+
+    # Also update in daily long_term/json/{date}.json if present
+    date_str = target_entry.get("date")
+    if date_str:
+        daily_file = target_dir / "long_term" / "json" / f"{date_str}.json"
+        if daily_file.exists():
+            try:
+                with open(daily_file, "r", encoding="utf-8") as f:
+                    daily_entries = json.load(f)
+                if isinstance(daily_entries, list):
+                    for d_entry in daily_entries:
+                        if d_entry.get("id") == record_id:
+                            d_entry["verified"] = True
+                            d_entry["status"] = "verified"
+                            d_entry["promoted_at"] = target_entry["promoted_at"]
+                    with open(daily_file, "w", encoding="utf-8") as f:
+                        json.dump(daily_entries, f, indent=2)
+            except Exception:
+                pass
+
+    # Promote to long-term memory as an actionable fact
+    try:
+        from core.llm import get_llm_client
+        active_client = client or get_llm_client()
+        active_store = store or MemoryStore(active_client, namespace="interpreter")
+        content_text = f"Verified Reflection Insight [{target_entry.get('explored_topic')}]: {target_entry.get('content')}"
+        active_store.write_long_term({
+            "content": content_text,
+            "topic": target_entry.get("explored_topic"),
+            "reflection_id": record_id,
+            "verified": True,
+        }, ltype="fact")
+
+        # If Neo4j is available, extract and add functional facts
+        if active_store.kg and active_store.kg.is_available():
+            try:
+                from memories.knowledge_extractor import extract_facts_from_turn
+                facts = extract_facts_from_turn(target_entry.get("content", ""), active_client)
+                for fact in facts:
+                    active_store.add_fact(
+                        subject=fact["subject"],
+                        predicate=fact["predicate"],
+                        obj=fact["object"],
+                        topic="tooling.knowledge",
+                        is_functional=True,
+                    )
+            except Exception as exc:
+                log_it(f"Neo4j promotion extraction failed: {exc}", _ENTITY)
+
+        log_it(f"Successfully promoted reflection {record_id} to long-term memory.", _ENTITY)
+        return True
+    except Exception as exc:
+        log_it(f"Failed to promote reflection to long-term memory: {exc}", _ENTITY)
+        return False
+
+
+def delete_reflection_entry(record_id: str, reflections_dir: Optional[Path] = None) -> bool:
+    """Delete a reflection entry from journal.json and daily archives."""
+    target_dir = Path(reflections_dir) if reflections_dir else _REFLECTIONS_DIR
+    journal_file = target_dir / "journal.json"
+    if not journal_file.exists():
+        return False
+
+    entries = load_reflection_journal(target_dir)
+    target_entry = None
+    for entry in entries:
+        if entry.get("id") == record_id:
+            target_entry = entry
+            break
+
+    if not target_entry:
+        return False
+
+    entries = [e for e in entries if e.get("id") != record_id]
+    try:
+        with open(journal_file, "w", encoding="utf-8") as f:
+            json.dump(entries, f, indent=2)
+    except Exception as exc:
+        log_it(f"Failed to update journal.json on delete: {exc}", _ENTITY)
+        return False
+
+    # Also remove from daily file
+    date_str = target_entry.get("date")
+    if date_str:
+        daily_file = target_dir / "long_term" / "json" / f"{date_str}.json"
+        if daily_file.exists():
+            try:
+                with open(daily_file, "r", encoding="utf-8") as f:
+                    daily_entries = json.load(f)
+                if isinstance(daily_entries, list):
+                    daily_entries = [d for d in daily_entries if d.get("id") != record_id]
+                    with open(daily_file, "w", encoding="utf-8") as f:
+                        json.dump(daily_entries, f, indent=2)
+            except Exception:
+                pass
+
+    log_it(f"Deleted reflection entry {record_id} from journal.", _ENTITY)
+    return True
 
 
 def _quarantine(text: str) -> str:
@@ -113,23 +325,88 @@ class ReflectionEngine:
     # Phase 1: Initiation and Topic Selection
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _extract_seed(self) -> str:
-        """Sample a recent substantive memory turn or fallback to system seed."""
+    def _extract_concept_from_memory(self, memory_text: str) -> str:
+        """Extract a sharp technical/algorithmic concept from a memory excerpt."""
         try:
-            turns = self.store.get_working_memory()
-            # Prioritize turns with directives, tool failures, or user input
-            candidates = [
-                t["content"] for t in turns
-                if t.get("role") in ("user", "assistant") and len(t.get("content", "")) > 20
-            ]
-            if candidates:
-                # Return most recent substantive turn
-                return candidates[-1][:400].strip()
+            prompt = CONCEPT_EXTRACTION_PROMPT.format(memory_text=memory_text[:800])
+            raw = self.client.generate(prompt, json_mode=True, temperature=0.0)
+            clean = self.client.clean_json_response(raw)
+            parsed = json.loads(clean)
+            if isinstance(parsed, dict) and parsed.get("concept"):
+                extracted = str(parsed["concept"]).strip()
+                if len(extracted) >= 5:
+                    return extracted
         except Exception as exc:
-            log_it(f"Failed to sample turn from working memory: {exc}", _ENTITY)
+            log_it(f"Concept extraction LLM call failed: {exc}", _ENTITY)
 
-        # Fallback to recent log or default frontier
-        return "MAVIS tool orchestration and DAG execution resilience"
+        # Fallback: take first substantive line or snippet
+        first_line = memory_text.strip().split("\n")[0][:100]
+        return first_line.strip()
+
+    def _extract_seed(self) -> Optional[str]:
+        """
+        Sample a random entry from the dedicated seed pool or long-term conceptual memory
+        (patterns, facts, verified reflections), then extract the core technical concept.
+        Returns None if no seeds or conceptual memories exist (0 token waste).
+        """
+        candidates: list[str] = []
+
+        # 1. Dedicated Seed Pool (user-managed)
+        try:
+            pool_seeds = load_seed_pool(self.reflections_dir)
+            if pool_seeds:
+                candidates.extend(pool_seeds)
+        except Exception as exc:
+            log_it(f"Failed to read seed pool: {exc}", _ENTITY)
+
+        # 2. Verified reflections from journal.json
+        try:
+            journal_entries = load_reflection_journal(self.reflections_dir)
+            for j_entry in journal_entries:
+                if j_entry.get("verified"):
+                    c = j_entry.get("explored_topic") or j_entry.get("content")
+                    if c and len(c.strip()) > 10:
+                        candidates.append(c.strip())
+        except Exception as exc:
+            log_it(f"Failed to read verified journal entries: {exc}", _ENTITY)
+
+        # 3. Conceptual long-term memories (patterns.json, facts.json)
+        try:
+            if self.reflections_dir and self.reflections_dir != _REFLECTIONS_DIR:
+                memories_root = self.reflections_dir
+            else:
+                memories_root = _MAV_ROOT / "memories"
+
+            if memories_root.exists():
+                for json_file in sorted(memories_root.glob("*/long_term/json/*.json")):
+                    fname = json_file.name
+                    if not (fname.startswith("pattern") or fname.startswith("fact")):
+                        continue
+                    try:
+                        with open(json_file, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                            if isinstance(data, list):
+                                for item in data:
+                                    if isinstance(item, dict):
+                                        ltype = item.get("ltype", "")
+                                        if ltype in ("pattern", "fact", "concept"):
+                                            c = item.get("content") or item.get("summary") or item.get("synthesis")
+                                            if c and isinstance(c, str) and len(c.strip()) > 15:
+                                                candidates.append(c.strip())
+                    except Exception:
+                        continue
+        except Exception as exc:
+            log_it(f"Failed to read long-term conceptual memory files: {exc}", _ENTITY)
+
+        if not candidates:
+            log_it("No conceptual seeds available in pool or long-term memory.", _ENTITY)
+            return None
+
+        chosen_raw = random.choice(candidates)
+        # Extract the core concept
+        concept = self._extract_concept_from_memory(chosen_raw)
+        log_it(f"Selected candidate seed and extracted concept: '{concept}'", _ENTITY)
+        return concept
 
     def _get_reference_embeddings(self, query_vec: list[float], top_k: int = 10) -> list[list[float]]:
         """Retrieve vector embeddings of closest existing memories."""
@@ -399,6 +676,7 @@ class ReflectionEngine:
         synthesis: Optional[str],
         ref_vecs: list[list[float]],
         history: list[dict],
+        record_id: Optional[str] = None,
     ) -> tuple[float, bool, Optional[str]]:
         """
         Measure mathematical Semantic Delta: Δ = 1 - max(Similarity).
@@ -433,9 +711,9 @@ class ReflectionEngine:
         refl_dir.mkdir(parents=True, exist_ok=True)
         file_path = refl_dir / f"{today}.json"
 
-        record_id = f"refl_{uuid.uuid4().hex[:8]}"
+        rec_id = record_id or f"refl_{uuid.uuid4().hex[:8]}"
         entry = {
-            "id": record_id,
+            "id": rec_id,
             "timestamp": time.time(),
             "date": today,
             "seed_concept": seed,
@@ -445,6 +723,8 @@ class ReflectionEngine:
             "semantic_delta": delta,
             "embedding": syn_vec,
             "iterations_count": len(history),
+            "verified": False,
+            "status": "pending_review",
             "history": history,
         }
 
@@ -462,23 +742,22 @@ class ReflectionEngine:
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(existing_entries, f, indent=2)
 
-        # Optional Neo4j extraction
-        if self.store.kg and self.store.kg.is_available():
+        # Also append to memories/reflections/journal.json
+        journal_file = self.reflections_dir / "journal.json"
+        journal_entries = []
+        if journal_file.exists():
             try:
-                from memories.knowledge_extractor import extract_facts_from_turn
-                facts = extract_facts_from_turn(synthesis, self.client)
-                for fact in facts:
-                    self.store.add_fact(
-                        subject=fact["subject"],
-                        predicate=fact["predicate"],
-                        obj=fact["object"],
-                        topic="reflection.insights",
-                        is_functional=False,  # reflection must never supersede other facts
-                    )
-            except Exception as exc:
-                log_it(f"Neo4j reflection facts extraction failed: {exc}", _ENTITY)
+                with open(journal_file, "r", encoding="utf-8") as f:
+                    journal_entries = json.load(f)
+                    if not isinstance(journal_entries, list):
+                        journal_entries = []
+            except Exception:
+                journal_entries = []
+        journal_entries.append(entry)
+        with open(journal_file, "w", encoding="utf-8") as f:
+            json.dump(journal_entries, f, indent=2)
 
-        self._notify("Phase 4", f"Successfully committed reflection insight to {file_path.name}")
+        self._notify("Phase 4", f"Successfully recorded reflection insight to journal ({record_id}, pending review)")
         return delta, True, str(file_path)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -506,7 +785,31 @@ class ReflectionEngine:
         start_time = time.time()
         refl_id = f"refl_{uuid.uuid4().hex[:8]}"
 
-        seed_concept = (seed or self._extract_seed()).strip()
+        extracted_seed = (seed or self._extract_seed() or "").strip()
+        if not extracted_seed:
+            dur = time.time() - start_time
+            msg = "No conceptual seeds available in seed pool or long-term memory."
+            log_it(f"Reflection cycle aborted: {msg}", _ENTITY)
+            res = ReflectionResult(
+                id=refl_id,
+                seed_concept="",
+                selected_topic="",
+                pivoted=False,
+                pivot_reason="No seeds in pool",
+                triage_score=0.0,
+                triage_category="empty_seed_pool",
+                passed_triage=False,
+                iterations_used=0,
+                web_searches_count=0,
+                local_reads_count=0,
+                status="no_seeds_available",
+                duration_seconds=dur,
+                rejection_reason=msg,
+            )
+            self._emit_metrics(res)
+            return res
+
+        seed_concept = extracted_seed
         topic = seed_concept
         pivoted = False
         pivot_reason = "Initial"
@@ -577,7 +880,7 @@ class ReflectionEngine:
 
             # Phase 4: Delta Evaluation & Storage
             delta, committed, path = self._phase4_evaluate_and_store(
-                seed_concept, topic, hypothesis, synthesis, ref_vecs, history
+                seed_concept, topic, hypothesis, synthesis, ref_vecs, history, record_id=refl_id
             )
             final_status = status if committed else "low_delta"
             rejection_reason = None

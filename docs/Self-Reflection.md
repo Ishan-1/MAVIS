@@ -23,7 +23,8 @@ The **Autonomous Reflection Architecture** introduces a self-directed, compute-e
                                                     ▼
                      ┌────────────────────────────────────────────────────────┐
                      │          Phase 1: Initiation & Topic Selection         │
-                     │  - Sample Recent Memory Shard (X)                      │
+                     │  - Sample from Seed Pool / Conceptual Long-Term Memory │
+                     │  - Extract 3-8 Word Technical Concept                  │
                      │  - Vectorize & Compute Density (D) & Variance (V)      │
                      │  - Rut Check: Direct Focus vs. 5-Candidate Pivot       │
                      │  - Novelty Weighting: W_i = 1 - max(S_i)               │
@@ -54,9 +55,10 @@ The **Autonomous Reflection Architecture** introduces a self-directed, compute-e
                      │           Phase 4: Evaluation & Storage                │
                      │  - Compute Semantic Delta: Δ = 1 - max(Similarity)     │
                      │  - Discard if Δ < 0.25 (paraphrase redundancy)         │
-                     │  - Ingest into memories/reflections/long_term/json/    │
-                     │  - Extract Triples to Neo4j (reflection.insights)     │
+                     │  - Append to memories/reflections/journal.json         │
+                     │  - Status: "pending_review", verified: false           │
                      │  - Write Telemetry to data/metrics/reflection.csv      │
+                     │  - Dashboard Review: Verify & Promote vs. Delete       │
                      └────────────────────────────────────────────────────────┘
 ```
 
@@ -64,8 +66,14 @@ The **Autonomous Reflection Architecture** introduces a self-directed, compute-e
 
 ## 3. Phase 1: Initiation and Topic Selection
 
-### 1. Seed Shard Extraction
-The cycle begins by sampling the most recent substantive user/assistant turn (truncated to 400 chars) from working memory. Tag-based prioritization (`directive`, `tool_failure`, emotion) is not implemented.
+### 1. Seed Shard Extraction & Concept Distillation
+The cycle begins by drawing a candidate from:
+1. **The Dedicated Seed Pool** (`memories/reflections/seeds.json`): Conceptual topics injected by the user via the Dashboard.
+2. **Conceptual Long-Term Memory**: Structured `patterns.json`, `facts.json`, and prior verified reflections. Tactical debug traces (`fixes.json`) and personal habits (`behaviours.json`) are strictly excluded.
+
+If no seeds or conceptual memories exist, the cycle halts cleanly with zero token waste (`status: "no_seeds_available"`).
+
+When a candidate is selected, Phase 1 invokes an LLM Concept Extractor (`CONCEPT_EXTRACTION_PROMPT`) to distill the underlying technical, algorithmic, or architectural concept into a sharp 3 to 8 word phrase (e.g., *"Subprocess output offloading in execution"*). This clean concept serves as $X$.
 
 ### 2. Quantifying Existing Knowledge
 The agent vectorizes $X$ using `memories.embedding.embed(X)` and queries the vector store for the top-$k$ nearest memories $\{m_1, m_2, \dots, m_k\}$ (with $k=10$).
@@ -200,16 +208,20 @@ All validated reflection memories are quarantined in their own domain to prevent
   {
     "id": "refl_6f8b2d1c",
     "timestamp": 1728912345.0,
-    "seed_topic": "ripgrep_regex_timeout",
-    "explored_concept": "ripgrep_pcre2_lookaround_limits",
+    "seed_concept": "ripgrep regex assertions",
+    "explored_topic": "ripgrep_pcre2_lookaround_limits",
     "triage_score": 0.88,
     "semantic_delta": 0.41,
-    "insight": "When using ripgrep with complex lookaround expressions, pass --pcre2 explicitly to avoid silent fallback failures on large multi-line buffers.",
-    "iterations": 2,
-    "evidence_sources": ["web:docs.rs/regex", "local:logs/pipeline_debugger.log"]
+    "content": "When using ripgrep with complex lookaround expressions, pass --pcre2 explicitly to avoid silent fallback failures on large multi-line buffers.",
+    "iterations_count": 2,
+    "verified": false,
+    "status": "pending_review"
   }
   ```
-- **Neo4j Knowledge Graph**: Structured triples are extracted via `memories/knowledge_extractor.py` and committed under the topic namespace `reflection.insights` with `is_functional=False`. These are not read by the Interpreter until reviewed and promoted by a human.
+- **Reflection Journal & Consent Sandbox**: Output is appended to `memories/reflections/journal.json` with `verified: false, status: "pending_review"`. Invariants guarantee the DAG planner and interpreter never read unverified entries.
+- **Dashboard Review Studio (`scripts/dashboard.py`)**: Users inspect journal entries under the Reflection tab:
+  * **Delete**: Permanently expunges unaligned reflections.
+  * **Verify & Promote**: Marks the reflection verified and commits it to permanent Long-Term Memory (`ltype="fact"`). This immediately makes the insight available to the active DAG planner and re-enrolls it into the Phase 1 conceptual seed pool.
 
 ### 3. Telemetry Logging
 Every reflection execution appends a row to `data/metrics/reflection.csv`:

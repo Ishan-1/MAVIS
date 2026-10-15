@@ -141,3 +141,24 @@ Return ONLY a valid JSON object:
   "summary_hypothesis": "The refined hypothesis backed by the evidence."
 }}
 """.strip()
+
+
+CONCEPT_EXTRACTION_PROMPT = """
+You are a technical concept extractor for MAVIS Autonomous Reflection.
+Given the following excerpt from long-term memory or a seed entry, extract the core technical, algorithmic, or architectural concept into a concise phrase (3 to 8 words).
+
+INPUT EXCERPT:
+\"\"\"{memory_text}\"\"\"
+
+Extract the underlying concept or design principle. Do not include specific variable names, IDs, dates, or error traces.
+Examples:
+- Input: "Tool Pattern [fetch_web_page]: Uses urllib3 PoolManager with ExponentialBackoffRetry on status codes 429 and 503." -> "HTTP backoff retry strategies with urllib3"
+- Input: "Subprocess output offloaded to scratchpad when exceeding 4000 bytes." -> "Large payload offloading in subprocess execution"
+- Input: "Gate nodes evaluated deterministically via restricted Python AST." -> "Deterministic AST gating in workflow graphs"
+
+Return ONLY a valid JSON object:
+{{
+  "concept": "Extracted Concept Name"
+}}
+""".strip()
+

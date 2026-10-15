@@ -28,6 +28,14 @@ from core.metrics import (
     get_metrics_summary,
     get_turn_trace,
 )
+from core.reflection import (
+    load_seed_pool,
+    add_seed_to_pool,
+    remove_seed_from_pool,
+    load_reflection_journal,
+    verify_and_promote_reflection,
+    delete_reflection_entry,
+)
 
 # ── Page Configuration & Theming ─────────────────────────────────────────────
 st.set_page_config(
@@ -372,13 +380,13 @@ with tab_memory:
 
 # ── Tab 7: Autonomous Reflection ─────────────────────────────────────────────
 with tab_reflection:
-    st.subheader("Autonomous Reflection Cycles")
+    st.subheader("Autonomous Reflection & Conceptual Growth")
+
+    # 1. Telemetry Metrics
     df_refl = load_component_csv("reflection")
     df_refl = filter_by_time(df_refl, time_cutoff)
 
-    if df_refl.empty:
-        st.info("No reflection cycles recorded yet.")
-    else:
+    if not df_refl.empty:
         committed_n = int((df_refl["committed"].astype(str).str.lower() == "true").sum()) if "committed" in df_refl.columns else 0
         rc1, rc2, rc3, rc4 = st.columns(4)
         rc1.metric("Cycles", f"{len(df_refl):,}")
@@ -387,9 +395,85 @@ with tab_reflection:
             rc3.metric("Avg Semantic Delta", f"{pd.to_numeric(df_refl['semantic_delta'], errors='coerce').mean():.3f}")
         if "latency_ms" in df_refl.columns:
             rc4.metric("Avg Latency", f"{df_refl['latency_ms'].mean():.0f} ms")
-        if "status" in df_refl.columns:
-            st.bar_chart(df_refl["status"].value_counts())
-        st.dataframe(df_refl.tail(50), use_container_width=True)
+
+    st.markdown("---")
+
+    # 2. Conceptual Seed Pool Management
+    st.subheader("🌱 Conceptual Seed Pool")
+    st.caption("Manage conceptual seeds that MAVIS randomly samples from to initiate reflection cycles. (No fallback is assumed if empty).")
+
+    with st.form("seed_pool_form", clear_on_submit=True):
+        sc_col1, sc_col2 = st.columns([5, 1])
+        new_seed_val = sc_col1.text_input("New Conceptual Seed", placeholder="e.g. Subprocess non-blocking stream multiplexing with selectors", label_visibility="collapsed")
+        submit_seed = sc_col2.form_submit_button("➕ Add Seed", use_container_width=True)
+        if submit_seed and new_seed_val.strip():
+            if add_seed_to_pool(new_seed_val.strip()):
+                st.success(f"Added '{new_seed_val.strip()}' to Seed Pool.")
+                st.rerun()
+
+    current_seeds = load_seed_pool()
+    if not current_seeds:
+        st.info("The Seed Pool is currently empty. Add conceptual seeds above to enable autonomous reflection.")
+    else:
+        st.markdown(f"**Current Seed Pool ({len(current_seeds)}):**")
+        for idx, s in enumerate(current_seeds):
+            c_txt, c_btn = st.columns([6, 1])
+            c_txt.markdown(f"• `{s}`")
+            if c_btn.button("🗑️ Remove", key=f"rm_seed_{idx}", help="Remove seed from pool"):
+                remove_seed_from_pool(s)
+                st.rerun()
+
+    st.markdown("---")
+
+    # 3. Self-Reflection Journal Review
+    st.subheader("📔 Self-Reflection Journal")
+    st.caption("Review completed exploration cycles. Insights remain sandboxed from the DAG planner until you verify & promote them into Long-Term Memory.")
+
+    journal_records = load_reflection_journal()
+    if not journal_records:
+        st.info("No reflection journal records recorded yet.")
+    else:
+        filter_opt = st.radio("Filter", ["All", "Pending Review", "Verified"], horizontal=True, key="journal_filter")
+        filtered_entries = list(reversed(journal_records))
+        if filter_opt == "Pending Review":
+            filtered_entries = [e for e in filtered_entries if not e.get("verified")]
+        elif filter_opt == "Verified":
+            filtered_entries = [e for e in filtered_entries if e.get("verified")]
+
+        if not filtered_entries:
+            st.info(f"No records matching filter '{filter_opt}'.")
+        else:
+            for entry in filtered_entries:
+                is_ver = entry.get("verified", False)
+                status_badge = "🟢 Verified" if is_ver else "🟡 Pending Review"
+                card_title = f"{entry.get('date', 'Unknown Date')} • {entry.get('explored_topic', 'Unnamed Topic')} ({status_badge})"
+
+                with st.expander(card_title, expanded=(not is_ver)):
+                    st.markdown(f"**Seed Concept:** `{entry.get('seed_concept', 'N/A')}`")
+                    if entry.get("hypothesis"):
+                        st.markdown(f"**Hypothesis:** {entry.get('hypothesis')}")
+                    st.markdown("**Distilled Insight:**")
+                    st.info(entry.get("content", ""))
+                    st.caption(f"Semantic Delta: {entry.get('semantic_delta', 0.0):.3f} | Turns Used: {entry.get('iterations_count', 0)} | ID: `{entry.get('id', '')}`")
+
+                    act_col1, act_col2, _ = st.columns([1.5, 1.5, 4])
+                    if not is_ver:
+                        if act_col1.button("✔️ Verify & Promote", key=f"vp_{entry['id']}", type="primary"):
+                            if verify_and_promote_reflection(entry["id"]):
+                                st.success("Verified and promoted to Long-Term Memory & Seed Pool!")
+                                st.rerun()
+
+                    if act_col2.button("🗑️ Delete", key=f"del_{entry['id']}", type="secondary"):
+                        if delete_reflection_entry(entry["id"]):
+                            st.warning("Deleted reflection entry.")
+                            st.rerun()
+
+    # 4. Raw Metrics Table
+    if not df_refl.empty:
+        with st.expander("📊 Raw Reflection Telemetry Logs"):
+            if "status" in df_refl.columns:
+                st.bar_chart(df_refl["status"].value_counts())
+            st.dataframe(df_refl.tail(50), use_container_width=True)
 
 # ── Tab 8: Turn & Goal Wave Trace Inspector (On-Demand Lazy Join) ─────────────
 with tab_trace:
