@@ -44,14 +44,52 @@ data/scratch/
 data/*.db
 memories/**/*.db
 
-# Auto-generated tools, agents, & test files
+# User-specific runtime data
+data/user_profile.json
+data/emails.json
+
+# Auto-generated tools & agents
 tools/*
+!tools/__init__.py
 !tools/run_shell_command.py
 !tools/search_web.py
-tests/
+
 agents/*
 !agents/__init__.py
 !agents/semantic_transform.py
+
+# Root tests: ignore auto-generated tool tests, whitelist core test suite
+/tests/*
+!/tests/conftest.py
+!/tests/mock_mcp_server.py
+!/tests/test_agent_lifecycle.py
+!/tests/test_caching_filter.py
+!/tests/test_catalog_manager.py
+!/tests/test_control_node.py
+!/tests/test_dag.py
+!/tests/test_gate_branching.py
+!/tests/test_gate_evaluator.py
+!/tests/test_goal_runner.py
+!/tests/test_goal_scratchpad.py
+!/tests/test_knowledge_extractor.py
+!/tests/test_mcp_client.py
+!/tests/test_mcp_integration.py
+!/tests/test_memory_specialization.py
+!/tests/test_memory_store_neo4j.py
+!/tests/test_metrics.py
+!/tests/test_neo4j_knowledge_graph.py
+!/tests/test_pipeline_debugger.py
+!/tests/test_pipeline_debugger_integration.py
+!/tests/test_reflection_engine.py
+!/tests/test_reflection_math.py
+!/tests/test_run_shell_command.py
+!/tests/test_scratchpad.py
+!/tests/test_search_web.py
+!/tests/test_security_evaluator.py
+!/tests/test_subagent_react.py
+!/tests/test_symmetrical_agent_builder.py
+!/tests/test_token_optimization.py
+!/tests/test_tool_agent_update.py
 
 # Memory persistence & runtime data
 memories/**/.cursor
@@ -76,6 +114,4 @@ Thumbs.db
 # Benchmark runtime workspaces & outputs
 benchmarks/outputs/
 benchmarks/workspaces/
-Pi-Bench/
 data/cache/
-

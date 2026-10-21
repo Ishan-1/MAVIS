@@ -1,78 +1,10 @@
 {
-    "get_current_datetime() -> tuple[int, str]": {
-        "description": "Retrieves the system's current date and time.",
-        "generalizability": "generalizable"
-    },
     "search_web(query: str, max_results: int = 5) -> tuple[int, str]": {
         "description": "Searches the web for real-time information, articles, and websites based on a given query using DuckDuckGo.",
         "generalizability": "generalizable"
     },
-    "extract_date_from_datetime(datetime_string: str) -> tuple[int, str]": {
-        "description": "Extracts the date part (YYYY-MM-DD) from a full datetime string.",
-        "generalizability": "generalizable"
-    },
-    "search_news(query: str, date: str = None, start_date: str = None, end_date: str = None) -> tuple[int, list]": {
-        "description": "Searches for news articles based on a query and an optional specific date or date range.",
-        "generalizability": "repurposable"
-    },
-    "parse_natural_date_to_yyyymmdd(date_string: str) -> tuple[int, str]": {
-        "description": "Parses a natural language date string into 'YYYY-MM-DD' format.",
-        "generalizability": "generalizable"
-    },
-    "set_user_display_name(name: str) -> tuple[int, bool]": {
-        "description": "Sets the preferred display name for the current user, to be used in future interactions.",
-        "generalizability": "generalizable"
-    },
-    "get_user_display_name() -> tuple[int, str]": {
-        "description": "Retrieves the current user's preferred display name.",
-        "generalizability": "generalizable"
-    },
-    "read_file_contents(filename: str) -> tuple[int, str]": {
-        "description": "Reads the content of a specified file from the current directory.",
-        "generalizability": "generalizable"
-    },
     "run_shell_command(command: str) -> tuple[int, str]": {
         "description": "Executes a shell command directly in the system's terminal.",
-        "generalizability": "generalizable"
-    },
-    "read_and_concatenate_files(filenames: list[str]) -> tuple[int, str]": {
-        "description": "Reads the content of multiple specified files and concatenates them into a single string.",
-        "generalizability": "generalizable"
-    },
-    "search_academic_papers(query: str) -> tuple[int, list]": {
-        "description": "Searches for academic papers and articles based on a query, without requiring an API key. Returns a list of relevant research papers, including titles, abstracts, and potentially links.",
-        "generalizability": "repurposable"
-    },
-    "write_file_contents(filename: str, content: str) -> tuple[int, bool]": {
-        "description": "Writes the given content to a specified file. Creates the file if it doesn't exist, overwrites if it does.",
-        "generalizability": "generalizable"
-    },
-    "set_email_filter_preference(filter_type: str, value: str, action: str = 'exclude')": {
-        "description": "Sets a persistent preference for filtering emails based on sender, subject keywords, or content. This preference should be applied to future email summary requests.",
-        "generalizability": "repurposable"
-    },
-    "get_schedule(date: str) -> list[dict]": {
-        "description": "Retrieves scheduled events for a specific date. Returns a list of event objects, each containing details like title, time, and description.",
-        "generalizability": "repurposable"
-    },
-    "split_text_into_chunks(text: str, max_chunk_size: int) -> tuple[int, list[str]]": {
-        "description": "Splits a given text into a list of smaller text chunks, ensuring no chunk exceeds `max_chunk_size` characters. It attempts to split on natural breaks (e.g., newlines, function definitions) if possible, but will split mid-line if necessary to respect `max_chunk_size`. Returns a tuple where the first element is 0 for success and the second is a list of strings (chunks).",
-        "generalizability": "generalizable"
-    },
-    "parse_list_string(list_string: str, index: int = None) -> tuple[int, Union[list[str], str]]": {
-        "description": "Parses a string representation of a Python list (e.g., \"['item1', 'item2']\") into an actual list. If an index is provided, it returns the element at that index. Otherwise, it returns the full list.",
-        "generalizability": "generalizable"
-    },
-    "write_file_contents(filename: str, content: str) -> tuple[int, str]": {
-        "description": "Writes the given content to a specified file. If the file does not exist, it will be created. If the file exists, its content will be overwritten.",
-        "generalizability": "generalizable"
-    },
-    "get_list_element_safe(list_data: list, index: int) -> tuple[int, str | None]": {
-        "description": "Safely retrieves an element from a list by its index. Returns the element as a string if found, or None if the index is out of bounds or the list is empty.",
-        "generalizability": "generalizable"
-    },
-    "get_list_length(list_data: list) -> tuple[int, int]": {
-        "description": "Returns the number of elements in a given list.",
         "generalizability": "generalizable"
     }
 }
