@@ -311,3 +311,41 @@ def test_journal_verify_and_delete_lifecycle(tmp_path, monkeypatch):
     journal_after_del = load_reflection_journal(tmp_path)
     assert len(journal_after_del) == 0
 
+
+def test_assistant_interaction_concept_reflection_cycle(tmp_path, monkeypatch):
+    """Verify reflection cycle on a non-technical assistant interaction heuristic."""
+    triage_resp = json.dumps({
+        "utility_score": 0.85,
+        "category": "assistant_heuristic",
+        "rationale": "High-value cognitive ergonomics pattern for response presentation.",
+        "pass": True,
+    })
+    gen_turn_1 = json.dumps({
+        "hypothesis": "Defaulting to progressive disclosure in multi-step task execution reduces cognitive load, provided debug mode is not active.",
+        "action_type": "web_search",
+        "action_payload": "progressive disclosure complex workflow UX Nielsen Norman",
+        "reasoning": "Verify empirical usability guidelines on progressive disclosure.",
+    })
+    critic_turn_1 = json.dumps({
+        "status": "ACCEPT",
+        "critique": "Solid empirical grounding with explicit boundary condition for debug mode.",
+        "synthesis": "When presenting multi-step execution plans, default to progressive disclosure showing only the active phase and final milestone; expose raw intermediate steps only upon failure or explicit user request.",
+    })
+
+    mock_llm = MockLLM(responses=[triage_resp, gen_turn_1, critic_turn_1])
+    engine = ReflectionEngine(client=mock_llm, reflections_dir=tmp_path)
+
+    monkeypatch.setattr(
+        "core.reflection.engine.search_web_sandboxed",
+        lambda query, max_results=3: (0, "NNGroup: Progressive disclosure defers advanced features or detailed logs to secondary screens, reducing initial cognitive friction.")
+    )
+
+    result = engine.run_cycle(seed="progressive disclosure in task workflows")
+
+    assert result.passed_triage is True
+    assert result.status == "accepted"
+    assert result.triage_category == "assistant_heuristic"
+    assert result.committed is True
+    assert "progressive disclosure" in result.synthesis.lower()
+
+
