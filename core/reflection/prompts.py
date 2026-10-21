@@ -39,20 +39,22 @@ SEED:
 PROPOSED EXPLORATION TOPIC:
 \"\"\"{candidate_topic}\"\"\"
 
-Evaluate whether actively exploring this topic is likely to produce:
-1. A concrete operational rule or heuristic for coding, debugging, or system tooling.
-2. Resolution to an architectural contradiction, bug, or failure mode.
-3. High-density conceptual compression of scattered facts.
+EVALUATION RUBRIC:
+Evaluate the proposed topic against the following discrete utility tiers:
+- 1.00 (High Utility): Directly yields concrete operational rules, CLI flags, error recovery procedures, or architectural solutions for autonomous software engineering.
+- 0.75 (Actionable Technical Pattern): Specific API convention, systems heuristic, or code pattern with clear practical utility.
+- 0.40 (Marginal / General Theory): High-level CS theory or generic concept with no direct operational relevance.
+- 0.00 (Reject / Trivia): Generic trivia, surface-level definitions, subjective opinion, or common knowledge.
 
-Assign a utility score between 0.00 and 1.00:
-- >= 0.70: Actionable technical insight, high probability of forming a reusable heuristic or rule.
-- < 0.70: Generic trivia, unfalsifiable philosophical ponderings, shallow rephrasing, or low-impact general knowledge.
+DECISION RULE:
+- Select exactly one of the rubric scores: 1.00, 0.75, 0.40, or 0.00.
+- Set "pass": true if utility_score >= 0.75, otherwise "pass": false.
 
 Return ONLY a valid JSON object:
 {{
-  "utility_score": 0.85,
+  "utility_score": 1.00,
   "category": "rule_formation",
-  "rationale": "One-line justification of why this is or is not actionable.",
+  "rationale": "One-line justification citing the specific rubric criteria.",
   "pass": true
 }}
 """.strip()
@@ -137,7 +139,6 @@ Discard any unverified assertions, hallucinations, or disputed claims.
 Return ONLY a valid JSON object:
 {{
   "synthesis": "2-3 sentence actionable technical insight based strictly on the gathered evidence.",
-  "confidence": 0.85,
   "summary_hypothesis": "The refined hypothesis backed by the evidence."
 }}
 """.strip()

@@ -516,7 +516,11 @@ class ReflectionEngine:
             category = str(res.get("category", "general"))
             rationale = str(res.get("rationale", ""))
             threshold = float(cfg.get("reflection", "triage_threshold", default=0.70))
-            passed = score >= threshold
+            pass_flag = res.get("pass")
+            if pass_flag is not None:
+                passed = bool(pass_flag) and (score >= threshold)
+            else:
+                passed = score >= threshold
         except Exception as exc:
             log_it(f"Triage JSON parse failed: {exc}. Defaulting to fail.", _ENTITY)
             passed = False
