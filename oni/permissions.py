@@ -55,18 +55,74 @@ def classify_url(url: str, config: ONIConfig, trust_level: str) -> Decision:
     return "allow"
 
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _is_protected_path(path: str) -> bool:
+    """
+    Check if path targets protected system files/directories unconditionally.
+
+    Protected paths:
+      - .env (any .env file or reference)
+      - data/mavis_config.json (ONI configuration / permission policy)
+      - oni/ (entire ONI gatekeeper subsystem)
+    """
+    if not path or not isinstance(path, str):
+        return False
+
+    norm_path = os.path.normpath(path)
+    base_name = os.path.basename(norm_path)
+
+    # 1. Any file named .env
+    if base_name == ".env" or norm_path == ".env":
+        return True
+
+    # 2. Determine relative path against repo root if absolute
+    if os.path.isabs(norm_path):
+        try:
+            rel = os.path.relpath(norm_path, _REPO_ROOT).replace("\\", "/")
+        except ValueError:
+            rel = norm_path.replace("\\", "/")
+    else:
+        rel = norm_path.replace("\\", "/")
+
+    if rel.startswith("./"):
+        rel = rel[2:]
+
+    # 3. Check .env relative
+    if rel == ".env" or rel.endswith("/.env"):
+        return True
+
+    # 4. Check data/mavis_config.json
+    if rel == "data/mavis_config.json" or base_name == "mavis_config.json":
+        return True
+
+    # 5. Check oni/ directory or files within oni/
+    if rel == "oni" or rel.startswith("oni/") or "/oni/" in f"/{rel}/":
+        return True
+
+    return False
+
+
 def classify_fs_write(path: str, config: ONIConfig, trust_level: str) -> Decision:
     """
     Classify a filesystem write or delete operation.
 
+    Unconditional protection:
+      - .env, data/mavis_config.json, and oni/ always return "deny",
+        regardless of trust level (including yolo mode).
+
     Allowed if:
-      - yolo mode, OR
+      - yolo mode (for non-protected paths), OR
       - path matches an entry in approved_fs_files (exact match), OR
       - path starts with an entry in approved_fs_write_paths
 
     In ask mode, unlisted paths trigger a greylist prompt.
     In whitelist_only mode, unlisted paths are denied.
     """
+    if _is_protected_path(path):
+        return "deny"
+
     if trust_level == "yolo":
         return "allow"
 

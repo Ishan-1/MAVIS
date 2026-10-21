@@ -65,6 +65,7 @@ agents/*
 !/tests/test_agent_lifecycle.py
 !/tests/test_caching_filter.py
 !/tests/test_catalog_manager.py
+!/tests/test_child_env_allowlist.py
 !/tests/test_control_node.py
 !/tests/test_dag.py
 !/tests/test_gate_branching.py
@@ -78,6 +79,7 @@ agents/*
 !/tests/test_memory_store_neo4j.py
 !/tests/test_metrics.py
 !/tests/test_neo4j_knowledge_graph.py
+!/tests/test_oni_permissions.py
 !/tests/test_pipeline_debugger.py
 !/tests/test_pipeline_debugger_integration.py
 !/tests/test_reflection_engine.py

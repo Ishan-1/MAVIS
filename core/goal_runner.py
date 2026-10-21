@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from core.helpers import log_it
+from core.helpers import log_it, quarantine
 from core.llm import BaseLLMClient, get_llm_client
 from core.metrics import MetricEmitter
 from memories.memory_store import MemoryStore
@@ -250,11 +250,15 @@ class GoalRunner:
             history_summary += f"Reasoning: {h.get('reasoning')}\n"
             history_summary += f"Outcome: {h.get('outcome')}\n"
 
+        scratchpad_str = json.dumps(scratchpad or {}, indent=2)
+        quarantined_scratchpad = quarantine(scratchpad_str)
+        quarantined_history = quarantine(history_summary) if history_summary else "None (initial wave)"
+
         user_content = (
             f"GOAL: {goal}\n"
             f"CURRENT ITERATION: {iteration} of {max_iterations}\n\n"
-            f"CURRENT GOAL SCRATCHPAD (BLACKBOARD):\n{json.dumps(scratchpad or {}, indent=2)}\n\n"
-            f"HISTORY OF PREVIOUS WAVES:\n{history_summary or 'None (initial wave)'}\n\n"
+            f"CURRENT GOAL SCRATCHPAD (BLACKBOARD):\n{quarantined_scratchpad}\n\n"
+            f"HISTORY OF PREVIOUS WAVES:\n{quarantined_history}\n\n"
             f"AVAILABLE COMMANDS:\n{json.dumps(commands_list or {}, indent=2)[:2000]}\n\n"
             f"AVAILABLE AGENTS:\n{json.dumps(agents_list or [], indent=2)}\n\n"
             "Plan the next wave DAG, specify scratchpad updates, or declare the goal completed/blocked."

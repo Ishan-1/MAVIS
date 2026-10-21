@@ -253,6 +253,7 @@ The function MUST satisfy ALL of the following requirements:
    - Return `-1, error_message_str` on failure. `error_message_str` is a string.
    Example: `return 0, result` or `return -1, "error message"`
 4. Any API keys must be loaded using `os.getenv()`. You may import `os` ONLY for `os.getenv()` and `os.path.*`.
+   MANDATORY CREDENTIAL CONVENTION: All external API keys or credentials MUST be named with the prefix `MAVIS_TOOL_` (e.g. `os.getenv("MAVIS_TOOL_WEATHER_API_KEY")`, `os.getenv("MAVIS_TOOL_NEWS_API_KEY")`) so that they pass through the subprocess environment sandbox.
 5. For any LLM-based tasks, prefer Gemini API over OpenAI API.
 
 SECURITY RULES — MANDATORY, NON-NEGOTIABLE:
@@ -276,7 +277,7 @@ SECURITY RULES — MANDATORY, NON-NEGOTIABLE:
 Follow the JSON output format exactly:
 {{
         "requirements": [package1, package2, ...],
-        "env": [VAR_1, VAR_2],
+        "env": ["MAVIS_TOOL_VAR_1", "MAVIS_TOOL_VAR_2"],
         "generalizability": "generalizable",
         "code": "The complete function code as a string"
 }}
@@ -338,7 +339,7 @@ Instructions:
 2. Produce a corrected implementation that satisfies the original signature and description.
 3. The fixed function must still follow these rules:
    - Return a tuple: (0, result) on success, (-1, error_message_str) on failure.
-   - Load any API keys via os.getenv().
+   - Load any API keys via os.getenv(). All external API keys or credentials MUST use the 'MAVIS_TOOL_' prefix (e.g. os.getenv("MAVIS_TOOL_...")) to pass through the subprocess environment sandbox.
    - Use only the packages listed in the original code's imports (you may add new ones only if strictly necessary).
 4. Do NOT change the function signature.
 
@@ -370,7 +371,7 @@ CRITICAL BACKWARD-COMPATIBILITY INVARIANTS:
 3. INTERNAL EXECUTION CONTRACT: Regardless of signature annotations, runtime return value MUST ALWAYS be a 2-element tuple: (status_code, result).
    - Return `0, result` on success.
    - Return `-1, error_message_str` on failure.
-4. Any API keys must be loaded using `os.getenv()`.
+4. Any API keys must be loaded using `os.getenv()`. All external API keys or credentials MUST use the prefix `MAVIS_TOOL_` (e.g. `os.getenv("MAVIS_TOOL_WEATHER_API_KEY")`) to pass through the subprocess environment sandbox.
 5. SECURITY RULES:
    - For ALL OS-level/shell commands, use: `from oni import call_shell`
    - For ALL filesystem operations, use: `from oni import call_fs`
@@ -381,7 +382,7 @@ CRITICAL BACKWARD-COMPATIBILITY INVARIANTS:
 Follow the JSON output format exactly:
 {{
     "requirements": [package1, package2],
-    "env": [VAR_1, VAR_2],
+    "env": ["MAVIS_TOOL_VAR_1", "MAVIS_TOOL_VAR_2"],
     "generalizability": "generalizable",
     "code": "The complete updated function code as a string",
     "updated_signature": "func_name(existing_params, new_param: type = default) -> tuple[int, return_type]",

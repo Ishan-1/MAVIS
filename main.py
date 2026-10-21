@@ -838,6 +838,13 @@ def _notify(title: str, body: str = "") -> None:
         pass  # Notifications are best-effort — never crash the main loop
 
 
+_TOOL_ENV_ALLOWLIST = {
+    "PATH", "HOME", "USER", "USERNAME", "LANG", "LC_ALL",
+    "PYTHONPATH", "TMPDIR", "TEMP", "TMP", "TERM",
+    "NEWS_API_KEY",
+}
+
+
 def call_command(command_name, params_dict):
     """
     Execute a tool in an isolated subprocess via run_tool.py with two-way IPC.
@@ -847,7 +854,10 @@ def call_command(command_name, params_dict):
     Bidirectional IPC handles interactive ONI approval prompts in the main terminal.
     A configurable timeout kills runaway tools.
     """
-    env = os.environ.copy()
+    env = {
+        k: v for k, v in os.environ.items()
+        if k in _TOOL_ENV_ALLOWLIST or k.startswith("MAVIS_")
+    }
     env["MAVIS_TOOL_SUBPROCESS"] = "1"
     env["MAVIS_TRUST_LEVEL"] = str(_oni._effective_trust())
     if hasattr(_oni, "session_allowances") and _oni.session_allowances:

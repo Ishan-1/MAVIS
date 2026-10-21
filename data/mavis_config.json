@@ -45,7 +45,6 @@
             "tests/",
             "memories/",
             "logs/",
-            "data/",
             "data/scratch/"
         ],
         "approved_fs_files": [
@@ -154,6 +153,7 @@
         "similarity_threshold": 0.85
     },
     "caching": {
-        "enabled": false
+        "enabled": false,
+        "filter_context_dependent": true
     }
 }
