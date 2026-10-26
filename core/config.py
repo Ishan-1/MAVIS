@@ -122,6 +122,7 @@ _DEFAULTS: dict = {
         "temperature": 1.0,
         "vertexai": True,
         "base_url": None,
+        "log_prompts": False,
     },
     "mcp": {
         "enabled": True,

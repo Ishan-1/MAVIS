@@ -124,7 +124,8 @@
         "embedding_model": "text-embedding-004",
         "temperature": 1.0,
         "vertexai": true,
-        "base_url": null
+        "base_url": null,
+        "log_prompts": false
     },
     "mcp": {
         "enabled": true,

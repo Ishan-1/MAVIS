@@ -566,7 +566,14 @@ def handle_slash_command(raw: str) -> bool:
 
         elif sub == "reload":
             cfg.reload()
-            mavis_ok("Config reloaded from disk.")
+            try:
+                with open("data/commands_list.json", "r") as file:
+                    new_cmds = json.load(file)
+                commands_list.clear()
+                commands_list.update(new_cmds)
+            except Exception as e:
+                mavis_warn(f"Could not reload commands_list: {e}")
+            mavis_ok("Config and commands_list reloaded from disk.")
             mavis_status(f"Trust level: {cfg.oni.get('trust_level', 'ask')}")
 
         elif sub == "set":
@@ -743,6 +750,15 @@ def _print_config() -> None:
         ("history_file",      out.get("history_file")),
         ("notify_threshold_s", out.get("notify_pipeline_threshold_s")),
     ], title="Output")
+
+    llm_c = d.get("llm", {})
+    print_table([
+        ("provider",         llm_c.get("provider")),
+        ("model",            llm_c.get("model")),
+        ("embedding_model",  llm_c.get("embedding_model")),
+        ("temperature",      llm_c.get("temperature")),
+        ("log_prompts",      llm_c.get("log_prompts")),
+    ], title="LLM")
 
     rule()
 
@@ -1480,6 +1496,7 @@ def interpret_command(command: str) -> bool:
     )
 
     t0_plan = time.perf_counter()
+    mavis_debug(f"Interpreter prompt sent to LLM:\n{user_prompt}", entity="interpreter")
     try:
         with spinner("Interpreting..."):
             response = llm.generate(
@@ -1487,7 +1504,7 @@ def interpret_command(command: str) -> bool:
                 json_mode=True,
                 system_instruction=interpreter_system_prompt,
             )
-        mavis_debug(response, entity="interpreter")
+        mavis_debug(f"Raw response: {response}", entity="interpreter")
         response_dict = json.loads(response)
     except json.JSONDecodeError:
         latency_ms = round((time.perf_counter() - t0_plan) * 1000, 2)

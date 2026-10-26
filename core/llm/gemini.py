@@ -46,6 +46,15 @@ class GeminiClient(BaseLLMClient):
         if system_instruction:
             config["system_instruction"] = system_instruction
 
+        self.log_prompt(
+            prompt=prompt,
+            system_instruction=system_instruction,
+            model=self.model,
+            provider="gemini",
+            extra={"temperature": temp, "json_mode": json_mode},
+            entity=_ENTITY,
+        )
+
         try:
             response = self._client.models.generate_content(
                 model=self.model,

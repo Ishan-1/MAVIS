@@ -59,6 +59,14 @@ class OpenAICompatClient(BaseLLMClient):
         }
 
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        self.log_prompt(
+            prompt=prompt,
+            system_instruction=system_instruction,
+            model=self.model,
+            provider="openai_compat",
+            extra={"temperature": payload["temperature"], "json_mode": json_mode},
+            entity=_ENTITY,
+        )
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
