@@ -171,3 +171,32 @@ def test_answerer_warns_on_control_failure():
     call_prompt = mock_llm.generate.call_args[0][0]
     assert "CRITICAL POST-CONDITION VERIFICATION WARNING" in call_prompt
     assert "Test suite had 1 failing test" in call_prompt
+
+
+def test_answerer_confirms_on_control_success():
+    mock_llm = MagicMock()
+    mock_llm.generate.return_value = "Git push completed: Everything is up-to-date."
+    answerer = Answerer(client=mock_llm)
+
+    pipeline_results = {
+        "n1": (0, "Everything up-to-date\n"),
+        "n_verify": {
+            "node_type": "control",
+            "success": True,
+            "status": 0,
+            "reason": "Condition satisfied: '$n1.status == 0'",
+        },
+    }
+
+    answer = answerer.synthesize(
+        query="do a git push",
+        pipeline_results=pipeline_results,
+    )
+
+    # Verify that the generated prompt to the LLM confirms successful completion
+    call_prompt = mock_llm.generate.call_args[0][0]
+    assert "POST-CONDITION VERIFICATION" in call_prompt
+    assert "Condition satisfied: '$n1.status == 0'" in call_prompt
+    assert "All verification checks passed successfully" in call_prompt
+    assert answer == "Git push completed: Everything is up-to-date."
+
