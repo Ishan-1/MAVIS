@@ -1,7 +1,7 @@
 # Architectural Decision: Sub-Agent Nodes & Terminal Answerer Module
 
 ## Status
-**Proposed / Accepted**
+**Accepted & Implemented**
 
 ---
 

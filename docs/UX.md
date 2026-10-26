@@ -27,6 +27,7 @@ Prefix commands that execute deterministically without invoking the LLM planner:
 |---|---|---|
 | `/help` | — | Display available slash commands and descriptions |
 | `/goal` | `[--yolo] <description>` | Execute an autonomous multi-wave goal (`--yolo` for unattended execution) |
+| `/reflect` | `[<seed>]` | Run one autonomous self-reflection cycle (`<seed>` optional concept override) |
 | `/status` | — | Inspect heartbeat age, background daemon workers, scheduler tasks, and memory pressure |
 | `/metrics` | `[session]` | Render terminal performance, token economics, latency percentiles, and caching tables |
 | `/dashboard` | — | Launch local Streamlit observability dashboard (`http://localhost:8501`) |
@@ -80,6 +81,7 @@ All terminal output is mediated through `core/output.py` backed by `rich`:
   - `quiet`: Only user-facing answers and critical warnings.
   - `normal`: Answers, high-level status messages, and approval gates (default).
   - `debug`: Detailed pipeline traces, raw LLM outputs, and diagnostic logs.
+- **Diagnostic Prompt Logging**: Separate from terminal verbosity, setting `"log_prompts": true` under `"llm"` in `data/mavis_config.json` logs complete prompts, few-shot templates, and raw completions to `logs/llm_prompts.log` for debugging tool synthesis and tool execution.
 
 ---
 

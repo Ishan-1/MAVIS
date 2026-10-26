@@ -4,6 +4,9 @@ MAVIS is a self-modifying, local-first personal AI assistant that dynamically ad
 
 MAVIS is **LLM provider-agnostic**, supporting cloud models (Google Gemini, OpenAI, Claude) and 100% offline local inference (via Ollama or OpenAI-compatible endpoints like vLLM).
 
+> [!TIP]
+> **Deep Dive into Architecture & Design**: Read the blog series discussing the design philosophy of the various parts of MAVIS: [MAVIS Design Series](https://ishan-1.github.io/#mavis-series).
+
 ---
 
 ## System Architecture
@@ -15,8 +18,10 @@ User Input (text)
 handle_slash_command()       ← /goal, /reflect, /status, /metrics, /dashboard, /tooldash, /config, /trust, /mcp, /save
       │  (if standard prompt)
       ▼
-cache_manager.check_cache()  ──► [Cache Hit >0.95] ─────────► Answerer.synthesize() (sub-ms instant reply)
-      │                      └─► [Pipeline Hit 0.85-0.95] ─► Fast LLM verify ──► execute_pipeline()
+cache_manager.check_cache()  ──► [Pre-Filter: caching_filter.py] (Context-Dependent / Deictic ──► Bypass Cache)
+      │                      ──► [Direct Hit >0.95] ─────────► Instant Reply (0 tokens, sub-ms)
+      │                      ──► [Pipeline Hit >0.95] ───────► Fast Parameter Extract ──► execute_pipeline()
+      │                      └─► [Pipeline Hit 0.85-0.95] ───► Decision Model (Noul) ──► execute_pipeline()
       ▼  (if miss)
 interpret_command() / /goal   ← Plans Heterogeneous DAG with Tool, Subagent, & Gate nodes
       │                          ├─ Discovers & syncs external tools via Model Context Protocol (MCP)
@@ -38,14 +43,14 @@ interpret_command() / /goal   ← Plans Heterogeneous DAG with Tool, Subagent, &
 execute_pipeline()
       ├─ ONI pre-flight scan   ← Security gate: blacklist aborts, greylist requests confirmation
       ├─ Live output streaming ← Streams subprocess stderr/stdout live to terminal (no frozen screens)
-      ├─ Gate evaluation       ← Evaluates condition ($node.status == 0) & prunes untaken branches
+      ├─ Gate evaluation       ← Evaluates condition ($node.status == 0, AST or Decision Model) & prunes branches
       ├─ Dispatch nodes        ← Executes "tools" (sandboxed subprocess), "MCP tools", & "subagents"
       ├─ Scratchpad offload    ← Large outputs (>4KB) offloaded to data/scratch/ with pointer digest
       ├─ node failure?         ──► PipelineDebugger.diagnose_and_repair()
       │                                ├─ Diagnoses root cause from error message & prior outputs
       │                                ├─ Patches parameters (e.g. path prefixes) or replaces node
       │                                └─ Retries execution closed-loop (up to 2 attempts)
-      ├─ cache_manager.save()  ← Caches executed pipeline & results to SQLite (on success) if they are not context dependent
+      ├─ cache_manager.save()  ← Caches executed pipeline & results to SQLite (on success) if not context dependent
       └─ Answerer.synthesize() ← Terminal presentation layer: synthesizes final output (or explains failures gracefully)
 ```
 
@@ -55,8 +60,8 @@ execute_pipeline()
 
 ### 1. Heterogeneous DAG, Gate Nodes, & Self-Healing Execution (`core/dag.py`, `core/gate_evaluator.py`, `core/pipeline_debugger.py`, `core/scratchpad.py`, `core/goal_runner.py`)
 - **Tool Nodes vs. Sub-Agent Nodes vs. Gate Nodes**: Treats deterministic code execution, cognitive reasoning, and conditional control flow as first-class primitives.
-- **Gate Nodes (`type: "gate"`) & Branch Pruning**: Supports deterministic evaluation (0 LLM tokens, $<1\text{ms}$ AST evaluator for conditions like `$n1.status == 0`, `len($n1.output) > 0`, `'failed' not in $n1.output.lower()`) and semantic NLP evaluations via LLM-as-a-Judge. Automatically sorts gates before dependent steps and prunes inactive branch subtrees.
-- **Autonomous Goal Runner (`/goal`)**: Executes high-level objectives across dynamically planned wave DAGs up to `max_iterations = 8`. Preserves strict mathematical acyclicity (preventing cycle errors) while enabling autonomous self-correction and looping. Runs under a single-prompt ONI Task-Scoped Lease.
+- **Gate Nodes (`type: "gate"`) & Branch Pruning**: Supports deterministic evaluation (0 LLM tokens, $<1\text{ms}$ AST evaluator for conditions like `$n1.status == 0`, `len($n1.output) > 0`, `'failed' not in $n1.output.lower()`) and semantic NLP evaluations via LLM-as-a-Judge and the typesafe Decision Model (`core/decision`). Automatically sorts gates before dependent steps and prunes inactive branch subtrees.
+- **Autonomous Goal Runner (`/goal`)**: Executes high-level objectives across dynamically planned wave DAGs up to `max_iterations = 8`. Preserves strict mathematical acyclicity (preventing cycle errors) while enabling autonomous self-correction and looping. Runs under a single-prompt ONI Task-Scoped Lease with strict `<quarantined_tool_output>` boundary delimiting.
 - **Live Output Streaming**: Subprocess execution prints live to the terminal line-by-line, providing immediate visual feedback during long compilation, test, or git tasks.
 - **Scratchpad Pointer Pattern (`core/scratchpad.py`)**: Automatically offloads tool outputs $>4\text{ KB}$ into `data/scratch/`, injecting compact Head/Tail summaries and file pointers into prompts to prevent token bloat while retaining 100% raw data fidelity.
 - **Closed-Loop Runtime Self-Healing (`PipelineDebugger`)**: Resolves live execution failures. When a tool or sub-agent fails, the debugger inspects the failure trace and prior node outputs, patches arguments (e.g. relative path resolution) or substitutes alternative nodes, and retries execution.
@@ -84,9 +89,11 @@ execute_pipeline()
 
 ### 4. ONI Security Harness (`oni/`)
 - **Process Isolation**: All dynamic tools run in independent sandboxed subprocesses (`core/run_tool.py`).
+- **Child Process Environment Sanitization**: Strips sensitive API keys, credentials, and internal `.env` variables before spawning tool subprocesses (`oni.sanitize_env`), preventing subprocess secret leakage.
 - **AST Code Guard**: Rejects scripts attempting forbidden imports (`subprocess`, `socket`, `pty`, `eval`) before execution.
+- **Protected Filesystem Write Paths**: `call_fs(write, ...)` enforces write boundaries strictly restricted to approved subdirectories (`tools/`, `tests/`, `memories/`, `logs/`, `data/scratch/`), protecting the project root and `.env`.
 - **Safe Read Whitelist**: Read-only inspection commands (`ls`, `find`, `read_file_contents`, `read_and_concatenate_files`, `git status`) execute without interactive prompt interruption.
-- **Task-Scoped Execution Leases**: Long-running autonomous goals (`/goal`) acquire a temporary single-prompt task lease (`oni.acquire_task_lease()`), allowing iterative wave pipelines to complete without repetitive permission dialogs.
+- **Task-Scoped Execution Leases**: Long-running autonomous goals (`/goal`) and reflection cycles acquire a temporary single-prompt task lease (`oni.acquire_task_lease()`), allowing iterative wave pipelines to complete without repetitive permission dialogs.
 - **Tiered Trust Levels**:
   - `ask`: Interactive user confirmation for write/network actions.
   - `yolo`: Automated execution for trusted sessions.
@@ -100,14 +107,17 @@ execute_pipeline()
   - **Agents**: Evaluated by an LLM-as-a-Judge against a 4-part rubric (Schema, Fidelity, Negative Constraints, Containment).
 - **Automated Self-Debugging**: Failed components enter an automated debug loop (up to 3 retries) and record verified fixes into Neo4j.
 
-### 6. SQLite Semantic Caching (`core/caching.py`)
-- **Zero External Vector Overhead**: A fast SQLite store with in-memory cosine similarity.
+### 6. SQLite Semantic Caching (`core/caching.py`, `core/caching_filter.py`)
+- **Zero External Vector Overhead**: A fast SQLite store (`data/pipeline_cache.db`) with in-memory cosine similarity.
+- **Direct Response Caching**: Queries with direct answers (no pipeline required) are cached with similarity $\ge 0.95$ and valid TTL, returning in sub-ms (0 LLM tokens) without DAG planning or Answerer synthesis.
 - **Tiered Retrieval**:
-  - `> 0.95` similarity: Instant cache hit.
-  - `0.85 - 0.95` similarity: Fast LLM verification checks if the cached pipeline satisfies the query.
+  - `> 0.95` similarity: Instant cache hit (pipeline execution or direct response).
+  - `0.85 - 0.95` similarity: Verified by the typesafe Decision Model (`core/decision`, `evaluate_noul`) to confirm semantic equivalence before execution.
+  - `< 0.85` similarity: Cache miss, hands off cleanly to DAG planning.
 - **Dynamic Parameter Extraction**: Adapts generalized pipelines to new inputs without replanning.
+- **Pre-filtering of Context-Dependent Queries (`core/caching_filter.py`)**: Intercepts anaphoric and deictic queries (*"Is this good?"*, *"Do that"*, *"repeat this"*, *"retry"*), bypassing the cache to prevent false-positive cross-session hits, and automatically purges legacy ambiguous entries.
 - **Lifecycle Management**: TTL invalidation for time-sensitive results and LRU eviction for storage caps.
-- **Pre-filtering of Context-based queries:** `caching_filter.py` filters out context-dependent queries to prevent cache hits such as "Is this good?", "Do that" , etc.
+
 ### 7. Categorical Tool Retrieval (`core/tool_retriever.py`)
 - **Prefix Caching Optimization**: Tools are classified into:
   - `generalizable`: Essential primitives (file reading, datetime). **Always included** in the prompt to prevent planning hallucinations.
@@ -115,7 +125,7 @@ execute_pipeline()
 - Backed by an embedded SQLite registry.
 
 ### 8. Telemetry & Observability (`core/metrics.py`, `scripts/dashboard.py`)
-- **Append-Only CSV Streams**: High-throughput metric emissions in `data/metrics/` across all components (including `gate_evaluator`, `goal_runner`, and `pipeline_debugger`).
+- **Append-Only CSV Streams**: High-throughput metric emissions in `data/metrics/` across all components (including `gate_evaluator`, `goal_runner`, `pipeline_debugger`, and `reflection`).
 - **Zero-Join Analytics**: Fast aggregations (Average, Median, Max) per component.
 - **Turn & Goal Wave Trace Inspector**: Reconstructs end-to-end execution lifecycles by lazily correlating `turn_id` or `goal_id`, visualizing multi-wave DAG progressions, gate decisions, and debugger repairs.
 - **Local Streamlit Dashboard**: Web UI accessible via `/dashboard` at `http://localhost:8501`.
@@ -125,10 +135,13 @@ execute_pipeline()
   - **Google Gemini**: Vertex AI & Gemini Studio (`gemini-2.5-flash`, `text-embedding-004`).
   - **OpenAI Compatible**: Native support for OpenAI, Groq, DeepSeek, and vLLM.
   - **Ollama**: Local offline inference (`llama3.2`, `nomic-embed-text`).
+- Optional live prompt and tool-call logging (`cfg.llm.get("log_prompts")`) for in-depth debugging.
 
 ### 10. Autonomous Self-Reflection (`core/reflection/`, `tasks/reflection_worker.py`, `/reflect`)
 - Compute-bounded learning cycles: topic selection (density/variance-gated pivot), triage gate, Generator-vs-Critic exploration loop with sandboxed web/local tools, and semantic-delta novelty check.
-- Insights persist to `memories/reflections/long_term/json/` and, when Neo4j is available, as triples under `reflection.insights` (not yet readable by the interpreter: reflection output is unverified, web-derived data and awaits a human review step).
+- **Discrete Utility Triage**: Evaluates proposed topics against discrete rubric tiers (`1.00`, `0.75`, `0.40`, `0.00`) and passes only when `utility_score >= 0.75`.
+- **Expanded Exploration Scope**: Explores both Systems & Tooling (Unix internals, memory safety, API resilience) and Assistant Intelligence & Human-AI Interaction (cognitive ergonomics, progressive disclosure, workflow pacing, GTD/task decomposition frameworks, context retention).
+- **Dashboard Review Studio & Seed Pool**: Users can inject conceptual seeds via `memories/reflections/seeds.json`, inspect pending reflections in the dashboard, verify & promote insights to permanent long-term memory, or delete unaligned reflections.
 - Disabled by default (`reflection.enabled`). Runs under a `whitelist_only` ONI lease, with web evidence quarantined as untrusted data, in a background worker every `scheduler.reflection_worker_interval_minutes` (default 1440), or on demand via `/reflect [seed]`. Tunables live under `reflection` in `data/mavis_config.json`. See `docs/Self-Reflection.md`.
 
 ---
@@ -218,11 +231,13 @@ MAV/
 ├── core/                       # Core execution & runtime package
 │   ├── config.py               # Central configuration manager (MAVISConfig)
 │   ├── helpers.py              # Canonical MAV_ROOT, estimate_tokens, log_it, sanitize_delimiter
-│   ├── caching.py              # SQLite semantic pipeline cache
+│   ├── caching.py              # SQLite semantic pipeline & direct response cache
+│   ├── caching_filter.py       # Context-dependent & deictic query pre-filtering
+│   ├── decision/               # Typesafe Decision Model & Noul logic evaluator
 │   ├── tool_retriever.py       # SQLite categorical tool retriever
 │   ├── mcp_client.py           # Model Context Protocol (MCP) stdio client & schema mapper
 │   ├── goal_runner.py          # Autonomous multi-wave goal execution engine
-│   ├── gate_evaluator.py       # Deterministic AST and NLP gate node evaluator
+│   ├── gate_evaluator.py       # Deterministic AST and NLP/DecisionModel gate evaluator
 │   ├── pipeline_debugger.py    # Closed-loop live DAG execution debugger & repair
 │   ├── manager.py              # Tool/agent catalog & registry manager
 │   ├── reflection/             # Autonomous reflection engine (engine, math_utils, prompts, tools_adapter)
@@ -237,6 +252,7 @@ MAV/
 │   └── llm/                    # Provider-agnostic LLM interface (Gemini, OpenAI, Ollama)
 ├── tool_builder/               # Autonomous tool builder, tester, & debug loop (tool_builder.py)
 ├── agent_builder/              # Cognitive sub-agent builder, Judge tester, & debugger (agent_builder.py)
+├── tools/                      # Baseline primitives (search_web.py, run_shell_command.py) & auto-tools
 ├── agents/                     # Built-in and dynamically synthesized cognitive sub-agents
 ├── memories/                   # Topic-subscribed memory subsystem
 │   ├── memory_store.py         # MemoryStore manager (_MEMORIES_DIR) & topic subscriptions
@@ -251,5 +267,5 @@ MAV/
 │   └── scratch/                # Automatic disk scratchpad for large step outputs
 ├── docs/                       # Architecture specifications (Memory, Caching, Subagents, ONI)
 ├── scripts/                    # Streamlit web dashboards (dashboard.py, tooldash.py)
-└── tests/                      # Automated test suite (unit and integration tests)
+└── tests/                      # Automated core test suite (whitelisted in .gitignore)
 ```

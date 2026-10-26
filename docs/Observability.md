@@ -80,38 +80,51 @@ Every emitted metric row includes an ISO-8601 `timestamp` and a correlating `tur
 
 ### Metrics Emitted by Component
 
+Every component appends to its dedicated CSV in `data/metrics/`:
+
 1. **Interpreter** (`data/metrics/interpreter.csv`)
-   - `timestamp`, `turn_id`, `latency_ms`, `status` (`direct_response` | `pipeline` | `error`), `input_tokens`, `output_tokens`, `tools_retrieved_count`
+   - `timestamp`, `turn_id`, `latency_ms`, `status`, `input_tokens`, `output_tokens`, `tools_retrieved_count`
 
 2. **Answerer** (`data/metrics/answerer.csv`)
-   - `timestamp`, `turn_id`, `latency_ms`, `status` (`success` | `error`), `input_tokens`, `output_tokens`
+   - `timestamp`, `turn_id`, `latency_ms`, `status`, `input_tokens`, `output_tokens`
 
 3. **DAG Execution Engine** (`data/metrics/dag_execution.csv`)
-   - `timestamp`, `turn_id`, `start_time`, `end_time`, `latency_ms`, `status` (`success` | `node_failed` | `aborted`), `dag_size` (step count), `dag_depth`, `tool_nodes_count`, `cognitive_nodes_count`, `subagent_nodes_count`, `failed_node_id`
+   - `timestamp`, `turn_id`, `start_time`, `end_time`, `latency_ms`, `status`, `dag_size`, `dag_depth`, `tool_nodes_count`, `cognitive_nodes_count`, `subagent_nodes_count`, `failed_node_id`
 
 4. **CachingManager** (`data/metrics/caching.csv`)
-   - `timestamp`, `turn_id`, `cache_status` (`hit` | `miss`), `hit_tier` (`instant` | `llm_verified` | `miss`), `similarity_score`, `llm_verify_result` (`verified` | `rejected` | `n/a`), `ttl_valid` (`true` | `false`), `latency_ms`, `tokens_saved_estimate`, `estimated_tokens_saved`
+   - `timestamp`, `turn_id`, `cache_status`, `hit_tier`, `similarity_score`, `llm_verify_result`, `ttl_valid`, `latency_ms`, `tokens_saved_estimate`, `estimated_tokens_saved`
 
 5. **ToolBuilder & AgentBuilder** (`data/metrics/builders.csv`)
-   - `timestamp`, `target_name`, `builder_type` (`tool` | `agent`), `latency_ms`, `status` (`passed` | `failed`), `attempt_count` (0 = first pass, 1–3 = debugger retry), `failure_reason` (`ast_violation` | `syntax` | `pytest_fail` | `judge_fail` | `none`), `debugger_prior_used` (`true` | `false`), `input_tokens`, `output_tokens`
+   - `timestamp`, `target_name`, `builder_type`, `latency_ms`, `status`, `attempt_count`, `failure_reason`, `debugger_prior_used`, `input_tokens`, `output_tokens`
 
 6. **Cognitive Nodes** (`data/metrics/cognitive.csv`)
-   - `timestamp`, `turn_id`, `agent_name`, `latency_ms`, `status` (`success` | `error`), `input_tokens`, `output_tokens`, `payload_truncated` (`true` | `false`)
+   - `timestamp`, `turn_id`, `agent_name`, `latency_ms`, `status`, `input_tokens`, `output_tokens`, `payload_truncated`
 
 7. **ReAct Subagents** (`data/metrics/subagents.csv`)
-   - `timestamp`, `turn_id`, `agent_name`, `latency_ms`, `status` (`success` | `error`), `input_tokens`, `output_tokens`, `turns_count`, `tools_called_count`, `hit_turn_cap` (`true` | `false`)
+   - `timestamp`, `turn_id`, `agent_name`, `latency_ms`, `status`, `input_tokens`, `output_tokens`, `turns_count`, `tools_called_count`, `hit_turn_cap`
 
-8. **Tool Usage & Subprocess Execution** (`data/metrics/tool_usage.csv`)
-   - `timestamp`, `turn_id`, `tool_name`, `status` (`0` | `-1`), `latency_ms`, `payload_truncated`, `is_mcp`, `cached`
+8. **ONI Security Harness** (`data/metrics/oni.csv`)
+   - `timestamp`, `turn_id`, `target_command_or_path`, `phase`, `trust_level`, `oni_decision`, `user_decision`, `dwell_time_ms`
 
-9. **Gate & Control Node Evaluator** (`data/metrics/gate_evaluator.csv`)
-   - `timestamp`, `turn_id`, `node_id`, `gate_type`, `mode` (`ast` | `nlp`), `condition`, `result` (`true` | `false`), `latency_ms`, `input_tokens`, `output_tokens`, `pruned_nodes_count`
+9. **Memory Manager & Workers** (`data/metrics/memory.csv`)
+   - `timestamp`, `event_type`, `working_tokens_count`, `compaction_triggered`, `tokens_freed`, `turns_evaluated`, `turns_promoted`, `facts_consolidated`
 
-10. **Autonomous Goal Runner** (`data/metrics/goal_runner.csv`)
-    - `timestamp`, `goal_id`, `wave_index`, `dag_size`, `nodes_succeeded`, `nodes_failed`, `latency_ms`, `status`, `input_tokens`, `output_tokens`
+10. **Pipeline Runtime Debugger** (`data/metrics/pipeline_debugger.csv`)
+    - `timestamp`, `turn_id`, `node_id`, `action`, `latency_ms`, `success`
 
-11. **Memory Manager & Workers** (`data/metrics/memory.csv`)
-    - `timestamp`, `event_type` (`working_turn` | `compaction` | `short_term_worker` | `long_term_worker`), `working_tokens_count`, `compaction_triggered` (`true` | `false`), `tokens_freed`, `turns_evaluated`, `turns_promoted`, `facts_consolidated`
+11. **Gate & Control Node Evaluator** (`data/metrics/gate_evaluator.csv`)
+    - `timestamp`, `turn_id`, `gate_id`, `mode`, `condition`, `verdict`, `latency_ms`
+
+12. **Autonomous Goal Runner** (`data/metrics/goal_runner.csv`)
+    - `timestamp`, `goal_id`, `goal`, `status`, `waves_executed`, `total_steps`, `duration_s`
+
+13. **Autonomous Self-Reflection Engine** (`data/metrics/reflection.csv`)
+    - `timestamp`, `reflection_id`, `seed_concept`, `selected_topic`, `pivoted`, `triage_score`, `iterations_used`, `web_searches_count`, `local_reads_count`, `semantic_delta`, `status`, `committed`, `latency_ms`
+
+### Prompt & Tool-Calling Debug Logging
+In addition to telemetry tables, MAVIS supports live prompt tracking for diagnostic debugging:
+- Configured via `"log_prompts": true` under `"llm"` in `data/mavis_config.json`.
+- When enabled, full system instructions, user prompts, few-shot examples, and raw model completions (including tool-call JSON and status traces) are recorded to `logs/llm_prompts.log` without cluttering the interactive terminal.
 
 ## 4. How to Display Metrics
 

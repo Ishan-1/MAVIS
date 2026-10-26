@@ -6,23 +6,23 @@ This document persists the architectural decisions, operational conventions, and
 
 ## 1. Golden Invariants & Constraints
 
-- **Never modify `tools/`**: All tool files inside `tools/` are user-owned baseline primitives. Do not edit them. Any adjustments, debugging repairs, or wrapping must be performed in `core/`, `main.py`, `oni/`, or specialized agents.
+- **Baseline Tools vs. Auto-Generated**: Version-controlled baseline primitives in `tools/` (`search_web.py`, `run_shell_command.py`) are protected core tools. Dynamically synthesized tools created by `ToolBuilder` are gitignored. Any repairs, wrappers, or enhancements must be performed in `core/`, `main.py`, `oni/`, or specialized agents.
 - **Python Environment & Tests**:
   - Virtualenv binary: `./bin/python`
   - Pytest runner: `./bin/pytest tests/<test_file>.py`
-  - Note: `tests/` is gitignored; do not stage or commit test files unless explicitly requested.
+  - Note: The core test suite (`tests/test_*.py`) is whitelisted in `.gitignore` and tracked in version control; only dynamically synthesized tool tests remain gitignored.
 - **Project Direction**: Feature scope is complete for personal use. Focus strictly on **hardening, robustness, edge-case recovery, token/latency optimization, and UX polish** on existing systems.
 
 ---
 
 ## 2. Core Architecture & Subsystems
 
-### A. DAG Parameter Resolution & Branching (`core/dag.py`)
+### A. DAG Parameter Resolution & Branching (`core/dag.py`, `core/gate_evaluator.py`, `core/decision/`)
 - **Parameter Interpolation**:
   - Standalone references (e.g. `"$node_id.output"` or `"$node_id"`) return native Python types (`dict`, `list`, `int`) to preserve type safety for subagents.
   - Embedded references inside composite strings (e.g. `'git commit -m "$n2.output"'`) are interpolated via `DEP_SEARCH_RE.sub()`, converting values to strings (or JSON serialization for dicts/lists).
 - **Gate Nodes (`type: "gate"`) & Pruning**:
-  - Evaluates deterministic expressions (e.g. `$node.status == 0`, `len($node.output) > 0`) via restricted AST in `<1ms` at 0 token cost, or fuzzy conditions via NLP LLM Judge (`mode: "nlp"`).
+  - Evaluates deterministic expressions (e.g. `$node.status == 0`, `len($node.output) > 0`) via restricted AST in `<1ms` at 0 token cost, or fuzzy semantic conditions via the typesafe Decision Model (`core/decision`, `evaluate_noul`) or NLP LLM Judge (`mode: "nlp"`).
   - Automatically topologically sorted before branch targets. Untaken subtrees are dynamically pruned via `compute_pruned_nodes()`.
 
 ### B. Autonomous Goal Runner (`core/goal_runner.py`, `/goal`)

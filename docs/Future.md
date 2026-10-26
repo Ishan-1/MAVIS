@@ -1,4 +1,3 @@
-## Future Work
-- **Context-Aware Semantic Caching**:
-  - Resolve anaphora and deictic references (e.g. queries like *"Repeat this again"*, *"do that with python"*, *"retry"*).
-  - Raw isolated queries containing deictic terms must either bypass semantic caching or be expanded against prior conversation context (e.g. incorporating previous turn's tool execution state/signature into the composite cache key) to prevent catastrophic false-positive cache hits across unrelated conversational sessions.
+# MAVIS Future Work
+
+1. Completing design of MAVIS-bench for proper evaluation of the MAVIS system, not the driving LLMs. Major evaluation axes currently are security, efficiency, robustness and proactiveness.

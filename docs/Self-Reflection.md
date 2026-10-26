@@ -35,10 +35,10 @@ The **Autonomous Reflection Architecture** introduces a self-directed, compute-e
                      ┌────────────────────────────────────────────────────────┐
                      │              Phase 2: The Triage Gate                  │
                      │  - Low-temp (0.0) Router Prompt                        │
-                     │  - Score utility: Rule, Contradiction, Compression     │
-                     │  - Score < 0.70 ──► [ INSTANT ABORT (0 wasted tokens) ]│
+                     │  - Discrete Rubric: 1.00, 0.75, 0.40, 0.00             │
+                     │  - Score < 0.75 ──► [ INSTANT ABORT (0 wasted tokens) ]│
                      └──────────────────────┬─────────────────────────────────┘
-                                            │ Score ≥ 0.70
+                                            │ Score ≥ 0.75 (pass: true)
                                             ▼
                      ┌────────────────────────────────────────────────────────┐
                      │         Phase 3: Adversarial Exploration Loop          │
@@ -90,7 +90,9 @@ The agent vectorizes $X$ using `memories.embedding.embed(X)` and queries the vec
 * **Balanced ($3 \le D < 5$ or $V \ge 0.25$)**: The agent possesses foundational knowledge with healthy variance; it pivots to structurally adjacent frontiers.
 
 ### 4. Candidate Generation (When Pivoting)
-When pivoting, the core LLM receives $X$ and generates 5 structurally adjacent or analogical concepts $\{c_1, c_2, c_3, c_4, c_5\}$.
+When pivoting, the core LLM receives $X$ and generates 5 structurally adjacent concepts $\{c_1, c_2, c_3, c_4, c_5\}$ exploring both:
+1. **Systems & Tooling**: Unix internals, memory optimization, error recovery, API resilience, algorithmic heuristics, execution safety.
+2. **Assistant Intelligence & Human-AI Interaction**: Cognitive ergonomics, progressive disclosure, workflow pacing, task decomposition frameworks (GTD, Eisenhower), personal knowledge management (PKM), context retention, and proactive vs. reactive intervention boundaries.
 
 ### 5. Inverse Weighting & Softmax Sampling
 For each candidate $c_i$:
@@ -110,23 +112,25 @@ For each candidate $c_i$:
 
 Before executing expensive web searches, code reading, or multi-turn reasoning loops, $c^*$ must clear a strict utility gate.
 
-### Evaluation Criteria
-A single low-temperature prompt (`temperature=0.0`) evaluates $(X, c^*)$ against three actionable dimensions:
-1. **Rule Formation**: Does exploring this concept likely yield an explicit operational heuristic, rule, or architectural improvement for MAVIS?
-2. **Contradiction Resolution**: Does it resolve an ambiguity, contradiction, or known tool/pipeline failure recorded in recent logs?
-3. **Conceptual Compression**: Does it unify disparate mechanisms into a simpler, higher-level mental model?
+### Evaluation Criteria & Discrete Rubric
+A single low-temperature prompt (`temperature=0.0`) evaluates $(X, c^*)$ against discrete utility tiers:
+- **`1.00 (High Utility)`**: Directly yields concrete operational rules, CLI flags, DAG execution heuristics, error recovery procedures, or explicit assistant interaction policies (e.g., communication pacing, memory retention thresholds, confirmation vs. execution boundaries).
+- **`0.75 (Actionable Pattern)`**: Specific API convention, systems heuristic, or validated human-assistant cognitive pattern (e.g., progressive disclosure, task decomposition model like GTD, cognitive load reduction) with clear practical utility.
+- **`0.40 (Marginal / General Theory)`**: High-level abstract theory, general philosophy, or generic advice with no concrete operational translation.
+- **`0.00 (Reject / Trivia)`**: Generic trivia, empty self-help platitudes, surface-level definitions, subjective opinion, or common knowledge.
 
-### Hard Kill Gate
-The router outputs a JSON payload with an LLM-estimated (uncalibrated) utility score $\in [0.0, 1.0]$:
+### Decision Rule & Circuit Breaker
+The router outputs a structured JSON evaluation adhering to the discrete tiers:
 ```json
 {
-  "utility_score": 0.82,
+  "utility_score": 1.00,
   "category": "rule_formation",
   "rationale": "Clarifies boundary conditions between ripgrep multiline flags and memory-safe streaming for pipeline log parsers.",
   "pass": true
 }
 ```
-* **Threshold**: If `utility_score < 0.70`, the cycle terminates immediately. Zero web searches and zero downstream inference calls are made.
+* **Decision Rule**: The router must select exactly one of the discrete rubric scores (`1.00`, `0.75`, `0.40`, or `0.00`) and set `"pass": true` if and only if `utility_score >= 0.75`.
+* **Circuit Breaker**: If `utility_score < 0.75` (or `pass: false`), the cycle aborts immediately (`status: "triaged_out"`). Zero web searches, file reads, or downstream inference calls are made.
 
 ---
 

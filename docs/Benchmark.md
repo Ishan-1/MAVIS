@@ -1,7 +1,7 @@
 # MAVIS Benchmark (MAVIS-Bench): Architecture & Design Specification
 
 ## Status
-**Proposed / Draft**
+**Implemented & Active**
 
 ---
 
