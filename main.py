@@ -1418,28 +1418,44 @@ def interpret_command(command: str) -> bool:
     # 0.5 Check Pipeline Cache
     cache_hit = cache_manager.check_cache(command, turn_id=turn_id)
     if cache_hit:
+        pipeline = cache_hit.get("pipeline") or []
         if cache_hit["ttl_valid"] and cache_hit["result"] is not None:
-            mavis_status("Cache hit (Result valid). Serving from cache.")
-            final_answer = answerer.synthesize(
-                query=command,
-                pipeline_results=cache_hit["result"],
-                memory_context=context,
-                turn_id=turn_id,
-            )
-            mavis_answer(final_answer)
-            _session_chat.append({
-                "role": "assistant",
-                "content": final_answer,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            })
-            return True
-        else:
+            if not pipeline:
+                mavis_status("Cache hit (Direct response). Serving from cache.")
+                direct_ans = cache_hit["result"]
+                mavis_answer(direct_ans)
+                _session_chat.append({
+                    "role": "assistant",
+                    "content": direct_ans,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                memory_store.add_turn(
+                    role="assistant",
+                    content=direct_ans,
+                )
+                return True
+            else:
+                mavis_status("Cache hit (Result valid). Serving from cache.")
+                final_answer = answerer.synthesize(
+                    query=command,
+                    pipeline_results=cache_hit["result"],
+                    memory_context=context,
+                    turn_id=turn_id,
+                )
+                mavis_answer(final_answer)
+                _session_chat.append({
+                    "role": "assistant",
+                    "content": final_answer,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                return True
+        elif pipeline:
             mavis_status("Cache hit (Pipeline valid, result expired). Re-running pipeline.")
-            res = execute_pipeline(cache_hit["pipeline"], query=command, context=context, turn_id=turn_id)
+            res = execute_pipeline(pipeline, query=command, context=context, turn_id=turn_id)
             if res:
                 cache_manager.save_cache(
                     command, 
-                    cache_hit["pipeline"], 
+                    pipeline, 
                     res, 
                     cache_hit.get("ttl", 300), 
                     cache_hit.get("generalizability", "specialized")
@@ -1516,6 +1532,20 @@ def interpret_command(command: str) -> bool:
     # 0. Check for direct context response (memory recall, stored facts, preferences)
     direct = response_dict.get("direct_response")
     if direct and direct.strip():
+        # Cache direct responses that do not rely on user memory context
+        used_memory = response_dict.get("used_memory_context", False)
+        cacheable = response_dict.get("cacheable", True)
+        if cacheable and not used_memory:
+            ttl = response_dict.get("ttl", 3600)
+            cache_manager.save_cache(
+                command,
+                pipeline=[],
+                result=direct.strip(),
+                ttl_seconds=ttl if ttl != 300 else 3600,  # default 1 hour for direct responses
+                generalizability="specialized",
+                cacheable=True,
+            )
+
         _interpreter_emitter.log({
             "turn_id": turn_id,
             "latency_ms": plan_latency_ms,

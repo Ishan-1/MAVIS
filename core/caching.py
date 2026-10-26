@@ -59,19 +59,20 @@ class CacheManager:
             log_it(f"Failed to initialize SQLite pipeline cache: {exc}", _ENTITY)
 
     def _verify_cache_with_llm(self, new_query: str, cached_query: str, pipeline_str: str, ttl_valid: bool) -> bool:
-        """Use LLM to verify if a cache hit between 0.85 and 0.95 is valid."""
-        prompt = (
-            f"A user asked: '{new_query}'.\n"
-            f"We have a cached pipeline originally generated for the query: '{cached_query}'.\n"
-            f"The pipeline is:\n{pipeline_str}\n\n"
-            "Does the cached pipeline fundamentally answer the new query? "
-            "Reply with exactly YES or NO."
-        )
+        """Use Decision Model (Noul) to verify if a cache hit between 0.85 and 0.95 is valid."""
+        from core.decision import get_decision_model
+        dm = get_decision_model(fallback_client=self._client)
+        state = {
+            "new_query": new_query,
+            "cached_query": cached_query,
+            "pipeline": pipeline_str,
+        }
+        statement = "Does the cached pipeline fundamentally answer and satisfy the new user query?"
         try:
-            response = self._client.generate(prompt, json_mode=False, system_instruction="You are a strict caching validator. Reply YES or NO.").strip().upper()
-            return response.startswith("YES")
+            res = dm.evaluate_noul(state, statement)
+            return bool(res.value)
         except Exception as e:
-            log_it(f"LLM cache verification failed: {e}", _ENTITY)
+            log_it(f"Decision model cache verification failed: {e}", _ENTITY)
             return False
 
     def _extract_parameters(self, new_query: str, cached_query: str, pipeline: list[dict]) -> list[dict]:
@@ -171,31 +172,40 @@ class CacheManager:
                 ttl_valid = time.time() < ttl_timestamp
                 llm_verify_result = "n/a"
 
-                if similarity > 0.95:
-                    hit_tier = "instant"
-                elif similarity >= 0.85:
-                    verified = self._verify_cache_with_llm(query, cached_query, pipe_str, ttl_valid)
-                    llm_verify_result = "verified" if verified else "rejected"
-                    if not verified:
+                is_direct_response = not pipeline
+
+                if is_direct_response:
+                    if not ttl_valid:
                         continue
-                    hit_tier = "llm_verified"
+                    if similarity < 0.95:
+                        continue
+                    hit_tier = "instant"
                 else:
-                    latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-                    _EMITTER.log({
-                        "turn_id": turn_id,
-                        "cache_status": "miss",
-                        "hit_tier": "miss",
-                        "similarity_score": round(similarity, 3),
-                        "llm_verify_result": "n/a",
-                        "ttl_valid": False,
-                        "latency_ms": latency_ms,
-                        "tokens_saved_estimate": 0,
-                    })
-                    return None
+                    if similarity > 0.95:
+                        hit_tier = "instant"
+                    elif similarity >= 0.85:
+                        verified = self._verify_cache_with_llm(query, cached_query, pipe_str, ttl_valid)
+                        llm_verify_result = "verified" if verified else "rejected"
+                        if not verified:
+                            continue
+                        hit_tier = "llm_verified"
+                    else:
+                        latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+                        _EMITTER.log({
+                            "turn_id": turn_id,
+                            "cache_status": "miss",
+                            "hit_tier": "miss",
+                            "similarity_score": round(similarity, 3),
+                            "llm_verify_result": "n/a",
+                            "ttl_valid": False,
+                            "latency_ms": latency_ms,
+                            "tokens_saved_estimate": 0,
+                        })
+                        return None
 
                 # Cache Hit Confirmed
                 final_pipeline = pipeline
-                if generalizability == "generalized" and similarity < 1.0:
+                if not is_direct_response and generalizability == "generalized" and similarity < 1.0:
                     final_pipeline = self._extract_parameters(query, cached_query, pipeline)
 
                 ttl_seconds = max(0, ttl_timestamp - ins_at)
@@ -214,7 +224,10 @@ class CacheManager:
                 })
 
                 if ttl_valid and result is not None:
-                    log_it(f"Full Cache Hit for '{query}' (similarity: {similarity:.2f})", _ENTITY)
+                    if is_direct_response:
+                        log_it(f"Direct Response Cache Hit for '{query}' (similarity: {similarity:.2f})", _ENTITY)
+                    else:
+                        log_it(f"Full Cache Hit for '{query}' (similarity: {similarity:.2f})", _ENTITY)
                     return {"pipeline": final_pipeline, "result": result, "ttl_valid": True, "ttl": ttl_seconds, "generalizability": generalizability}
                 else:
                     log_it(f"Pipeline Cache Hit for '{query}' (similarity: {similarity:.2f}), result expired", _ENTITY)

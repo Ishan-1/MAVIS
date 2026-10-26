@@ -302,44 +302,39 @@ def evaluate_nlp_with_reason(
     client: BaseLLMClient | None = None,
 ) -> tuple[bool, str]:
     """
-    Evaluate a fuzzy semantic condition via fast LLM-as-a-judge.
+    Evaluate a fuzzy semantic condition via Decision Model (Noul).
     Returns (verdict, reason).
     """
     if not condition_str or not condition_str.strip():
         return True, "Empty condition automatically satisfied"
 
-    if client is None:
-        client = get_llm_client()
-
-    prompt = (
-        "You are an impartial binary evaluation judge for an automated pipeline.\n"
-        "Your task is to determine whether the CONDITION is satisfied based strictly on the provided CONTEXT.\n\n"
-        f"CONDITION: {condition_str.strip()}\n\n"
-        f"CONTEXT:\n{json.dumps(context_payload, indent=2, default=str)[:3000]}\n\n"
-        "Respond ONLY with a JSON object in this exact format:\n"
-        '{"verdict": true, "reason": "brief explanation"}\n'
-        'or\n'
-        '{"verdict": false, "reason": "brief explanation"}'
-    )
+    from core.decision import get_decision_model
+    decision_model = get_decision_model(fallback_client=client)
 
     try:
-        response_text = client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=100,
-        )
-        # Parse JSON
-        m = re.search(r"\{.*\}", response_text, re.DOTALL)
-        if m:
-            data = json.loads(m.group(0))
-            verdict = bool(data.get("verdict", False))
-            reason = str(data.get("reason", "Semantic judgment rendered."))
-            log_it(f"NLP Judge verdict for '{condition_str}': {verdict} ({reason})", _ENTITY)
-            return verdict, reason
+        res = decision_model.evaluate_noul(context_payload, condition_str)
+        verdict = bool(res.value)
+        reason = None
+        if isinstance(res.raw, dict) and "reason" in res.raw:
+            reason = str(res.raw["reason"])
+        elif isinstance(res.raw, str) and '"reason"' in res.raw:
+            try:
+                m = re.search(r"\{.*\}", res.raw, re.DOTALL)
+                if m:
+                    parsed = json.loads(m.group(0))
+                    if "reason" in parsed:
+                        reason = str(parsed["reason"])
+            except Exception:
+                pass
+
+        if not reason:
+            reason = f"Decision model evaluated condition '{condition_str}': verdict={verdict} (conf={res.confidence:.2f})"
+
+        log_it(f"NLP Judge verdict for '{condition_str}': {verdict} ({reason})", _ENTITY)
+        return verdict, reason
     except Exception as e:
         log_it(f"NLP condition evaluation error: {e}", _ENTITY)
         return False, f"NLP judge exception: {e}"
-
-    return False, "NLP judge returned unparseable response"
 
 
 def evaluate_nlp(

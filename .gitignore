@@ -63,11 +63,12 @@ agents/*
 !/tests/conftest.py
 !/tests/mock_mcp_server.py
 !/tests/test_agent_lifecycle.py
-!/tests/test_caching_filter.py
+!/tests/test_caching.py
 !/tests/test_catalog_manager.py
 !/tests/test_child_env_allowlist.py
 !/tests/test_control_node.py
 !/tests/test_dag.py
+!/tests/test_decision_model.py
 !/tests/test_gate_branching.py
 !/tests/test_gate_evaluator.py
 !/tests/test_goal_runner.py

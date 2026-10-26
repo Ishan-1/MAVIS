@@ -153,7 +153,7 @@
         "similarity_threshold": 0.85
     },
     "caching": {
-        "enabled": false,
+        "enabled": true,
         "filter_context_dependent": true
     }
 }

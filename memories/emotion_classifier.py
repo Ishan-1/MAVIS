@@ -114,4 +114,16 @@ def should_promote_long_term(directive: bool | float, content: str) -> tuple[boo
         )
         return True, "fact"
 
+    # Semantic evaluation fallback via Decision Model when explicit keywords are absent
+    try:
+        from core.decision import get_decision_model
+        dm = get_decision_model()
+        statement = "The text specifies a permanent personal rule, preference, or system behavior instruction to remember forever."
+        res = dm.evaluate_noul(content, statement)
+        if res.value and res.confidence >= 0.75:
+            log_it(f"Long-term promotion triggered via Decision Model Noul (conf={res.confidence:.2f}).", _ENTITY)
+            return True, "behaviour"
+    except Exception as exc:
+        log_it(f"Decision model directive evaluation skipped: {exc}", _ENTITY)
+
     return False, ""

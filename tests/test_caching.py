@@ -1,16 +1,28 @@
 """
-tests/test_caching_filter.py
-Unit tests for semantic cache pre-filtering and context-dependency detection.
+tests/test_caching.py
+Comprehensive unit tests for MAVIS Semantic Caching layer:
+- Deterministic context-dependency pre-filtering
+- CacheManager storage, TTL, LRU, and purge operations
+- Direct response caching with 1-hour TTL and strict similarity threshold
+- Observability and hit-rate metrics
 """
+from __future__ import annotations
+
+import json
 import sqlite3
+import time
 import hashlib
 import pytest
 
-from core.caching_filter import is_context_dependent_query, is_cacheable_query
 from core.caching import CacheManager
+from core.caching_filter import is_context_dependent_query, is_cacheable_query
 from core.config import cfg
 from core.metrics import get_metrics_summary, MetricEmitter
 
+
+# ==============================================================================
+# 1. Structural Pre-Filter Battery Tests
+# ==============================================================================
 
 def test_table_driven_battery_phrasings():
     """
@@ -58,15 +70,14 @@ def test_table_driven_battery_phrasings():
         # ── Standalone queries (MUST NOT bypass / must be cacheable) ──────────
         ("Okta SSO setup steps", False),
         ("What is the capital of France?", False),
-        ("Current date and time?", False),
         ("Run pytest tests/test_metrics.py", False),
-        ("How do I fix a ZeroDivisionError in Python?", False),
-        ("List all files in /tmp", False),
-        ("can you go through the uncommited changes and tell me what did they add/fix?", False),
-        # ── Inline payload exemptions (MUST NOT bypass) ──────────────────────
+        ("Search recent tech news", False),
+        ("Current date and time?", False),
         ("Explain this code: def foo(): return 42", False),
-        ("What is the meaning of this error: NameError: name x is not defined", False),
-        ("Can you fix this error: SyntaxError: invalid syntax in math_lib.py?", False),
+        ("Who is the president of France?", False),
+        ("Find all python files in src directory", False),
+        ("How do I configure nginx reverse proxy?", False),
+        ("What are you?", False),
     ]
 
     for query, expected_dep in cases:
@@ -75,16 +86,18 @@ def test_table_driven_battery_phrasings():
 
 
 def test_workspace_prefix_handling():
-    q_dep = "[Workspace: /home/user/project]\nThanks for the update. Now fix the bug."
+    """Verify that [Workspace: ...] prefixes are stripped before checking context dependency."""
+    q_dep = "[Workspace: /path/to/repo]\nMake it shorter"
     is_dep, _ = is_context_dependent_query(q_dep)
     assert is_dep is True
 
-    q_standalone = "[Workspace: /home/user/project]\nCurrent date and time?"
+    q_standalone = "[Workspace: /path/to/repo]\nRun pytest tests/test_metrics.py"
     is_dep, _ = is_context_dependent_query(q_standalone)
     assert is_dep is False
 
 
 def test_cache_manager_check_cache_bypasses(tmp_path, monkeypatch):
+    """Verify check_cache returns None immediately without calling embed or DB for dependent queries."""
     db_file = tmp_path / "test_cache.db"
     monkeypatch.setitem(cfg.caching, "enabled", True)
     monkeypatch.setitem(cfg.caching, "filter_context_dependent", True)
@@ -101,6 +114,7 @@ def test_cache_manager_check_cache_bypasses(tmp_path, monkeypatch):
 
 
 def test_cache_manager_save_cache_prefilters_and_stable_id(tmp_path, monkeypatch):
+    """Verify save_cache skips dependent queries and uses stable deterministic sha256 id."""
     db_file = tmp_path / "test_cache.db"
     monkeypatch.setitem(cfg.caching, "enabled", True)
     monkeypatch.setitem(cfg.caching, "filter_context_dependent", True)
@@ -140,6 +154,7 @@ def test_cache_manager_save_cache_prefilters_and_stable_id(tmp_path, monkeypatch
 
 
 def test_cache_manager_purge_context_dependent(tmp_path, monkeypatch):
+    """Verify startup and periodic purge strips existing context-dependent entries."""
     db_file = tmp_path / "test_cache.db"
     monkeypatch.setitem(cfg.caching, "enabled", True)
     monkeypatch.setitem(cfg.caching, "filter_context_dependent", False)  # disable auto-purge on init
@@ -222,3 +237,159 @@ def test_metrics_eligible_hit_rate_not_diluted(tmp_path, monkeypatch):
     # Hit rate must be 1 / 2 = 50.0%, NOT 1 / 4 = 25.0%
     assert c["hit_rate_pct"] == 50.0
     assert c["bypass_rate_pct"] == 50.0
+
+
+# ==============================================================================
+# 2. Direct Response Caching Tests
+# ==============================================================================
+
+def test_direct_response_save_and_hit_instant(tmp_path, monkeypatch):
+    """Saving a direct response (pipeline=[]) produces an instant cache hit when sim >= 0.95."""
+    db_file = tmp_path / "test_direct_cache.db"
+    monkeypatch.setitem(cfg.caching, "enabled", True)
+    monkeypatch.setitem(cfg.caching, "filter_context_dependent", True)
+
+    def fake_embed(text, client=None):
+        return [1.0, 0.0, 0.0]
+
+    monkeypatch.setattr("core.caching.embed", fake_embed)
+
+    cm = CacheManager(client=None, db_path=str(db_file))
+
+    # Save direct response
+    cm.save_cache(
+        query="What are you?",
+        pipeline=[],
+        result="I am MAVIS (My Awesome Virtual Intelligence Suite).",
+        ttl_seconds=3600,
+        generalizability="specialized",
+        cacheable=True,
+    )
+
+    # Verify stored row in sqlite
+    with sqlite3.connect(str(db_file)) as conn:
+        row = conn.execute("SELECT query, pipeline, result, ttl_timestamp FROM pipeline_cache").fetchone()
+        assert row is not None
+        assert row[0] == "What are you?"
+        assert row[1] == "[]"
+        assert json.loads(row[2]) == "I am MAVIS (My Awesome Virtual Intelligence Suite)."
+        assert row[3] > time.time() + 3500
+
+    # Query with exact embedding (sim = 1.0 >= 0.95)
+    hit = cm.check_cache("What are you?", turn_id="t_hit")
+    assert hit is not None
+    assert hit["pipeline"] == []
+    assert hit["result"] == "I am MAVIS (My Awesome Virtual Intelligence Suite)."
+    assert hit["ttl_valid"] is True
+
+
+def test_direct_response_strict_similarity_guard(tmp_path, monkeypatch):
+    """Direct responses require similarity >= 0.95; lower similarities (e.g. 0.88) are rejected."""
+    db_file = tmp_path / "test_direct_strict.db"
+    monkeypatch.setitem(cfg.caching, "enabled", True)
+    monkeypatch.setitem(cfg.caching, "filter_context_dependent", True)
+
+    cm = CacheManager(client=None, db_path=str(db_file))
+    with sqlite3.connect(str(db_file)) as conn:
+        conn.execute("""
+            INSERT INTO pipeline_cache (id, query, pipeline, result, embedding, ttl_timestamp, generalizability, inserted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "id_direct_1",
+            "What is MAVIS?",
+            "[]",
+            json.dumps("MAVIS is an AI assistant."),
+            json.dumps([1.0, 0.0]),
+            int(time.time()) + 3600,
+            "specialized",
+            int(time.time()),
+        ))
+        conn.commit()
+
+    # Query with embedding [0.88, 0.4749] -> cosine similarity approx 0.88 (< 0.95)
+    def fake_embed(text, client=None):
+        return [0.88, 0.4749]
+
+    monkeypatch.setattr("core.caching.embed", fake_embed)
+
+    hit = cm.check_cache("What is MAVLink?", turn_id="t_loose")
+    # Must reject and return None because direct responses do not use loose 0.85-0.94 tier
+    assert hit is None
+
+
+def test_direct_response_expired_ttl_is_miss(tmp_path, monkeypatch):
+    """Expired direct response cannot be re-executed, so it results in a cache miss."""
+    db_file = tmp_path / "test_direct_expired.db"
+    monkeypatch.setitem(cfg.caching, "enabled", True)
+    monkeypatch.setitem(cfg.caching, "filter_context_dependent", True)
+
+    cm = CacheManager(client=None, db_path=str(db_file))
+    with sqlite3.connect(str(db_file)) as conn:
+        conn.execute("""
+            INSERT INTO pipeline_cache (id, query, pipeline, result, embedding, ttl_timestamp, generalizability, inserted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "id_exp_1",
+            "What are you?",
+            "[]",
+            json.dumps("I am MAVIS."),
+            json.dumps([1.0, 0.0]),
+            int(time.time()) - 100,  # Expired
+            "specialized",
+            int(time.time()) - 200,
+        ))
+        conn.commit()
+
+    def fake_embed(text, client=None):
+        return [1.0, 0.0]
+
+    monkeypatch.setattr("core.caching.embed", fake_embed)
+
+    hit = cm.check_cache("What are you?", turn_id="t_exp")
+    assert hit is None
+
+
+def test_direct_response_context_dependent_prefiltered(tmp_path, monkeypatch):
+    """Context-dependent direct queries (e.g. bare pronouns) are prefiltered."""
+    db_file = tmp_path / "test_direct_dep.db"
+    monkeypatch.setitem(cfg.caching, "enabled", True)
+    monkeypatch.setitem(cfg.caching, "filter_context_dependent", True)
+
+    cm = CacheManager(client=None, db_path=str(db_file))
+
+    # Try saving a context-dependent query
+    cm.save_cache(
+        query="What did that mean?",
+        pipeline=[],
+        result="It meant success.",
+        ttl_seconds=3600,
+        cacheable=True,
+    )
+
+    with sqlite3.connect(str(db_file)) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM pipeline_cache").fetchone()[0]
+        assert count == 0
+
+    # Try checking a context-dependent query
+    hit = cm.check_cache("What did that mean?", turn_id="t_dep")
+    assert hit is None
+
+
+def test_direct_response_save_bypassed_if_not_cacheable(tmp_path, monkeypatch):
+    """save_cache is bypassed if cacheable=False."""
+    db_file = tmp_path / "test_direct_uncacheable.db"
+    monkeypatch.setitem(cfg.caching, "enabled", True)
+    monkeypatch.setitem(cfg.caching, "filter_context_dependent", True)
+
+    cm = CacheManager(client=None, db_path=str(db_file))
+    cm.save_cache(
+        query="What are you?",
+        pipeline=[],
+        result="I am MAVIS.",
+        ttl_seconds=3600,
+        cacheable=False,
+    )
+
+    with sqlite3.connect(str(db_file)) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM pipeline_cache").fetchone()[0]
+        assert count == 0

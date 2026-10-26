@@ -36,7 +36,8 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
 6.  **Caching Parameters:**
     - `ttl`: Output TTL (time-to-live) in seconds for the pipeline result. For volatile queries (e.g., current time, weather) use a short TTL (like 60). For static data (e.g., historical facts), use a large TTL. Default is 300.
     - `generalizability`: Specify if the generated pipeline is "generalized" (reusable with different parameters) or "specialized" (highly specific to the query).
-    - `cacheable`: Boolean (default true). Set to false if the user input depends on prior conversational context, refers to temporary interactive state, or uses relative time anchors (e.g., "yesterday", "tomorrow", "earlier", "since last run").
+    - `used_memory_context`: Boolean (default false). Set to true ONLY if `direct_response` answers using personal user facts, preferences, or past conversation history from `MEMORY CONTEXT`. Set to false for general world knowledge, definitions, or fixed assistant identity (e.g., "What are you?").
+    - `cacheable`: Boolean (default true). Set to false if `used_memory_context` is true, if the user input depends on prior conversational context, refers to temporary interactive state, or uses relative time anchors (e.g., "yesterday", "tomorrow", "earlier", "since last run").
 7.  **Emotion & Directive Classifier:**
     - `emotion`: frustration, excitement, urgency, sadness, neutral.
     - `emotion_strength`: "low", "medium", or "high".
@@ -81,6 +82,7 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
   ],
   "ttl": 300,
   "generalizability": "generalized",
+  "used_memory_context": false,
   "cacheable": true,
   "emotion": "neutral",
   "emotion_strength": "low",
@@ -102,6 +104,8 @@ Your goal is to decompose the user's request into an executable **Directed Acycl
   "pipeline": [],
   "missing_commands": [],
   "missing_agents": [],
+  "used_memory_context": false,
+  "cacheable": true,
   "emotion": "neutral",
   "emotion_strength": "low",
   "directive": false
